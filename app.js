@@ -21,6 +21,9 @@ document.addEventListener('DOMContentLoaded', () => {
     updateStats();
     loadTheme();
 
+    // Initialize the default browse view
+    initializeBrowse();
+
     // Show API key reminder if not set
     if (!TMDB_API_KEY) {
         showToast('⚠️ Please add your TMDB API key in app.js to search for movies!');
