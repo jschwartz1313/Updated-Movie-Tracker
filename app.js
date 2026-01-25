@@ -143,10 +143,12 @@ function refreshCurrentView() {
 
 async function searchMovies() {
     const query = document.getElementById('search-input').value.trim();
+    const mediaType = document.getElementById('search-media-type').value;
     const resultsContainer = document.getElementById('search-results');
+    const mediaLabel = mediaType === 'tv' ? 'TV shows' : 'movies';
 
     if (!query) {
-        showToast('Please enter a movie title');
+        showToast(`Please enter a ${mediaType === 'tv' ? 'TV show' : 'movie'} title`);
         return;
     }
 
@@ -155,7 +157,7 @@ async function searchMovies() {
             <div class="empty-state">
                 <div class="empty-state-icon">🔑</div>
                 <div class="empty-state-text">
-                    Please add your TMDB API key to search for movies.<br><br>
+                    Please add your TMDB API key to search for ${mediaLabel}.<br><br>
                     Get a free API key at: <a href="https://www.themoviedb.org/settings/api" target="_blank">themoviedb.org</a><br>
                     Then add it to the TMDB_API_KEY variable in app.js
                 </div>
@@ -164,21 +166,21 @@ async function searchMovies() {
         return;
     }
 
-    resultsContainer.innerHTML = '<div class="loading"><div class="spinner"></div>Searching...</div>';
+    resultsContainer.innerHTML = `<div class="loading"><div class="spinner"></div>Searching ${mediaLabel}...</div>`;
 
     try {
         const response = await fetch(
-            `${TMDB_BASE_URL}/search/movie?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(query)}&page=1`
+            `${TMDB_BASE_URL}/search/${mediaType}?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(query)}&page=1`
         );
         const data = await response.json();
 
         if (data.results && data.results.length > 0) {
-            renderSearchResults(data.results);
+            renderSearchResults(data.results, mediaType);
         } else {
             resultsContainer.innerHTML = `
                 <div class="empty-state">
                     <div class="empty-state-icon">🔍</div>
-                    <div class="empty-state-text">No movies found for "${query}"</div>
+                    <div class="empty-state-text">No ${mediaLabel} found for "${query}"</div>
                 </div>
             `;
         }
@@ -187,46 +189,47 @@ async function searchMovies() {
         resultsContainer.innerHTML = `
             <div class="empty-state">
                 <div class="empty-state-icon">❌</div>
-                <div class="empty-state-text">Error searching movies. Please try again.</div>
+                <div class="empty-state-text">Error searching ${mediaLabel}. Please try again.</div>
             </div>
         `;
-        showToast('Error searching movies');
+        showToast(`Error searching ${mediaLabel}`);
     }
 }
 
-function renderSearchResults(results) {
+function renderSearchResults(results, mediaType = 'movie') {
     const container = document.getElementById('search-results');
     container.innerHTML = '<div class="movie-grid"></div>';
     const grid = container.querySelector('.movie-grid');
 
-    results.slice(0, 20).forEach(movie => {
-        const mediaType = 'movie'; // Search is currently movie-only
-        const isInWatchlist = movies.watchlist.some(m => m.id === movie.id && m.mediaType === mediaType);
-        const isWatched = movies.watched.some(m => m.id === movie.id && m.mediaType === mediaType);
+    results.slice(0, 20).forEach(item => {
+        const title = item.title || item.name;
+        const releaseDate = item.release_date || item.first_air_date;
+        const isInWatchlist = movies.watchlist.some(m => m.id === item.id && m.mediaType === mediaType);
+        const isWatched = movies.watched.some(m => m.id === item.id && m.mediaType === mediaType);
 
         const card = document.createElement('div');
         card.className = 'movie-card';
         card.innerHTML = `
             <img
-                src="${movie.poster_path ? TMDB_IMAGE_BASE + movie.poster_path : 'https://via.placeholder.com/500x750?text=No+Poster'}"
-                alt="${movie.title}"
+                src="${item.poster_path ? TMDB_IMAGE_BASE + item.poster_path : 'https://via.placeholder.com/500x750?text=No+Poster'}"
+                alt="${title}"
                 class="movie-poster"
             />
             <div class="movie-info">
-                <div class="movie-title">${movie.title}</div>
-                <div class="movie-year">${movie.release_date ? movie.release_date.split('-')[0] : 'N/A'}</div>
+                <div class="movie-title">${title}</div>
+                <div class="movie-year">${releaseDate ? releaseDate.split('-')[0] : 'N/A'}</div>
                 <div class="movie-actions">
                     ${!isInWatchlist && !isWatched ?
-                        `<button class="btn btn-primary btn-small" onclick="addToWatchlist(${movie.id}, 'movie')">+ Watchlist</button>` :
+                        `<button class="btn btn-primary btn-small" onclick="addToWatchlist(${item.id}, '${mediaType}')">+ Watchlist</button>` :
                         ''}
                     ${!isWatched ?
-                        `<button class="btn btn-secondary btn-small" onclick="addToWatched(${movie.id}, 'movie')">✓ Watched</button>` :
+                        `<button class="btn btn-secondary btn-small" onclick="addToWatched(${item.id}, '${mediaType}')">✓ Watched</button>` :
                         '<span style="color: var(--success); font-size: 12px;">✓ In Collection</span>'}
                 </div>
             </div>
         `;
 
-        card.querySelector('.movie-poster').addEventListener('click', () => showMediaDetail(movie.id, null, 'movie'));
+        card.querySelector('.movie-poster').addEventListener('click', () => showMediaDetail(item.id, null, mediaType));
         grid.appendChild(card);
     });
 }
@@ -531,6 +534,9 @@ async function addToWatchlist(mediaId, mediaType = 'movie') {
         return;
     }
 
+    // Show loading state
+    showToast(`Adding to watchlist...`);
+
     const details = await getMediaDetails(mediaId, mediaType);
     if (!details) {
         showToast(`Error adding ${mediaType === 'tv' ? 'show' : 'movie'}`);
@@ -573,6 +579,9 @@ async function addToWatched(mediaId, mediaType = 'movie') {
         showToast('Already in watched list');
         return;
     }
+
+    // Show loading state
+    showToast(`Adding to watched list...`);
 
     const details = await getMediaDetails(mediaId, mediaType);
     if (!details) {
@@ -632,6 +641,11 @@ function removeFromWatchlist(movieId, mediaType = 'movie') {
     const movie = movies.watchlist.find(m => m.id === movieId && m.mediaType === mediaType);
     if (!movie) return;
 
+    // Confirm before removing
+    if (!confirm(`Remove "${movie.title}" from watchlist?`)) {
+        return;
+    }
+
     movies.watchlist = movies.watchlist.filter(m => !(m.id === movieId && m.mediaType === mediaType));
     saveMoviesToStorage();
     updateCounts();
@@ -642,6 +656,11 @@ function removeFromWatchlist(movieId, mediaType = 'movie') {
 function removeFromWatched(movieId, mediaType = 'movie') {
     const movie = movies.watched.find(m => m.id === movieId && m.mediaType === mediaType);
     if (!movie) return;
+
+    // Confirm before removing
+    if (!confirm(`Remove "${movie.title}" from watched list? This will also delete your rating.`)) {
+        return;
+    }
 
     movies.watched = movies.watched.filter(m => !(m.id === movieId && m.mediaType === mediaType));
     saveMoviesToStorage();
@@ -659,6 +678,27 @@ function rateMovie(movieId, rating, mediaType = 'movie') {
     saveMoviesToStorage();
     updateStats();
     showToast(`Rated "${movie.title}" ${rating}/10`);
+
+    // Update the modal display to show the new rating immediately
+    const modalRating = document.getElementById('modal-rating');
+    if (modalRating) {
+        // Update star display in modal
+        modalRating.innerHTML = [1,2,3,4,5,6,7,8,9,10].map(i =>
+            `<span class="star ${i <= rating ? 'active' : ''}" onclick="rateMovie(${movieId}, ${i}, '${mediaType}')">★</span>`
+        ).join('');
+
+        // Update rating text
+        const ratingText = modalRating.parentElement.querySelector('.rating-text');
+        if (ratingText) {
+            ratingText.textContent = `${rating}/10`;
+        }
+    }
+
+    // Refresh the watched list if we're on that view
+    const activeView = document.querySelector('.nav-btn.active')?.dataset.view;
+    if (activeView === 'watched') {
+        renderWatched();
+    }
 }
 
 // ============= Rendering Functions =============
@@ -666,8 +706,10 @@ function rateMovie(movieId, rating, mediaType = 'movie') {
 function renderWatchlist() {
     const container = document.getElementById('watchlist-grid');
     const sortBy = document.getElementById('watchlist-sort').value;
+    const clearBtn = document.getElementById('clear-watchlist-btn');
 
     if (movies.watchlist.length === 0) {
+        clearBtn.style.display = 'none';
         container.innerHTML = `
             <div class="empty-state">
                 <div class="empty-state-icon">📝</div>
@@ -676,6 +718,9 @@ function renderWatchlist() {
         `;
         return;
     }
+
+    // Show clear button when there are items
+    clearBtn.style.display = 'block';
 
     // Sort movies
     const sorted = [...movies.watchlist].sort((a, b) => {
@@ -697,6 +742,21 @@ function renderWatchlist() {
     });
 }
 
+function clearWatchlist() {
+    if (movies.watchlist.length === 0) return;
+
+    // Confirm before clearing
+    if (!confirm(`Clear all ${movies.watchlist.length} items from your watchlist?`)) {
+        return;
+    }
+
+    movies.watchlist = [];
+    saveMoviesToStorage();
+    updateCounts();
+    renderWatchlist();
+    showToast('Watchlist cleared');
+}
+
 function renderWatched() {
     const container = document.getElementById('watched-grid');
     const sortBy = document.getElementById('watched-sort').value;
@@ -705,7 +765,7 @@ function renderWatched() {
         container.innerHTML = `
             <div class="empty-state">
                 <div class="empty-state-icon">🎬</div>
-                <div class="empty-state-text">No watched movies yet. Start tracking your movie journey!</div>
+                <div class="empty-state-text">No watched items yet. Start tracking your journey!</div>
             </div>
         `;
         return;
@@ -905,7 +965,7 @@ function displayMovieModal(movie, listType) {
                                 `<span class="star ${i <= (movie.rating || 0) ? 'active' : ''}" onclick="rateMovie(${movie.id}, ${i}, '${mediaType}')">★</span>`
                             ).join('')}
                         </div>
-                        <div style="margin-top: 5px; font-size: 14px; color: var(--text-secondary);">
+                        <div class="rating-text" style="margin-top: 5px; font-size: 14px; color: var(--text-secondary);">
                             ${movie.rating ? `${movie.rating}/10` : 'Not rated yet'}
                         </div>
                     </div>
@@ -1015,7 +1075,7 @@ function renderTopRated() {
         .slice(0, 5);
 
     if (topMovies.length === 0) {
-        container.innerHTML = '<div class="empty-state-text">No rated movies yet</div>';
+        container.innerHTML = '<div class="empty-state-text">No rated items yet</div>';
         return;
     }
 
@@ -1054,7 +1114,7 @@ function renderGenreStats() {
         <div class="genre-item">
             <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
                 <strong>${genre}</strong>
-                <span>${count} movies</span>
+                <span>${count} ${count === 1 ? 'item' : 'items'}</span>
             </div>
             <div class="genre-bar">
                 <div class="genre-bar-fill" style="width: ${(count / maxCount) * 100}%"></div>

@@ -26,9 +26,15 @@
         <!-- Search View -->
         <section class="view active" id="search-view">
             <div class="search-container">
-                <h2>Search Movies</h2>
+                <h2>Search Movies & TV Shows</h2>
+                <div style="display: flex; gap: 10px; margin-bottom: 15px; align-items: center;">
+                    <select id="search-media-type" class="genre-filter">
+                        <option value="movie">Movies</option>
+                        <option value="tv">TV Shows</option>
+                    </select>
+                </div>
                 <div class="search-box">
-                    <input type="text" id="search-input" placeholder="Search for a movie..." />
+                    <input type="text" id="search-input" placeholder="Search for a movie or TV show..." />
                     <button id="search-btn">Search</button>
                 </div>
                 <div class="search-results" id="search-results"></div>
@@ -70,12 +76,13 @@
             <div class="list-container">
                 <div class="list-header">
                     <h2>My Watchlist</h2>
-                    <div class="filters">
+                    <div class="filters" style="display: flex; gap: 10px; align-items: center;">
                         <select id="watchlist-sort">
                             <option value="added">Recently Added</option>
                             <option value="title">Title (A-Z)</option>
                             <option value="year">Release Year</option>
                         </select>
+                        <button class="btn btn-danger btn-small" id="clear-watchlist-btn" onclick="clearWatchlist()" style="display: none;">Clear All</button>
                     </div>
                 </div>
                 <div class="movie-grid" id="watchlist-grid"></div>
@@ -86,7 +93,7 @@
         <section class="view" id="watched-view">
             <div class="list-container">
                 <div class="list-header">
-                    <h2>Watched Movies</h2>
+                    <h2>Watched</h2>
                     <div class="filters">
                         <select id="watched-sort">
                             <option value="rating">Highest Rated</option>
@@ -108,11 +115,11 @@
                 <div class="stats-grid">
                     <div class="stat-card">
                         <div class="stat-value" id="total-movies">0</div>
-                        <div class="stat-label">Total Movies</div>
+                        <div class="stat-label">Total Items</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-value" id="total-watched">0</div>
-                        <div class="stat-label">Movies Watched</div>
+                        <div class="stat-label">Items Watched</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-value" id="avg-rating">0</div>
@@ -125,7 +132,7 @@
                 </div>
 
                 <div class="top-movies">
-                    <h3>Top Rated Movies</h3>
+                    <h3>Top Rated</h3>
                     <div id="top-rated-list"></div>
                 </div>
 
