@@ -9,6 +9,10 @@ let movies = {
     watched: []
 };
 
+// Track media type for each item
+const MEDIA_TYPE_MOVIE = 'movie';
+const MEDIA_TYPE_TV = 'tv';
+
 // Initialize App
 document.addEventListener('DOMContentLoaded', () => {
     loadMoviesFromStorage();
@@ -166,8 +170,9 @@ function renderSearchResults(results) {
     const grid = container.querySelector('.movie-grid');
 
     results.slice(0, 20).forEach(movie => {
-        const isInWatchlist = movies.watchlist.some(m => m.id === movie.id);
-        const isWatched = movies.watched.some(m => m.id === movie.id);
+        const mediaType = 'movie'; // Search is currently movie-only
+        const isInWatchlist = movies.watchlist.some(m => m.id === movie.id && m.mediaType === mediaType);
+        const isWatched = movies.watched.some(m => m.id === movie.id && m.mediaType === mediaType);
 
         const card = document.createElement('div');
         card.className = 'movie-card';
@@ -182,16 +187,16 @@ function renderSearchResults(results) {
                 <div class="movie-year">${movie.release_date ? movie.release_date.split('-')[0] : 'N/A'}</div>
                 <div class="movie-actions">
                     ${!isInWatchlist && !isWatched ?
-                        `<button class="btn btn-primary btn-small" onclick="addToWatchlist(${movie.id})">+ Watchlist</button>` :
+                        `<button class="btn btn-primary btn-small" onclick="addToWatchlist(${movie.id}, 'movie')">+ Watchlist</button>` :
                         ''}
                     ${!isWatched ?
-                        `<button class="btn btn-secondary btn-small" onclick="addToWatched(${movie.id})">✓ Watched</button>` :
+                        `<button class="btn btn-secondary btn-small" onclick="addToWatched(${movie.id}, 'movie')">✓ Watched</button>` :
                         '<span style="color: var(--success); font-size: 12px;">✓ In Collection</span>'}
                 </div>
             </div>
         `;
 
-        card.querySelector('.movie-poster').addEventListener('click', () => showMovieDetail(movie.id));
+        card.querySelector('.movie-poster').addEventListener('click', () => showMediaDetail(movie.id, null, 'movie'));
         grid.appendChild(card);
     });
 }
@@ -201,13 +206,31 @@ async function getMovieDetails(movieId) {
 
     try {
         const response = await fetch(
-            `${TMDB_BASE_URL}/movie/${movieId}?api_key=${TMDB_API_KEY}&append_to_response=credits`
+            `${TMDB_BASE_URL}/movie/${movieId}?api_key=${TMDB_API_KEY}&append_to_response=credits,watch/providers,external_ids`
         );
         return await response.json();
     } catch (error) {
         console.error('Error fetching movie details:', error);
         return null;
     }
+}
+
+async function getTVDetails(tvId) {
+    if (!TMDB_API_KEY) return null;
+
+    try {
+        const response = await fetch(
+            `${TMDB_BASE_URL}/tv/${tvId}?api_key=${TMDB_API_KEY}&append_to_response=credits,watch/providers,external_ids`
+        );
+        return await response.json();
+    } catch (error) {
+        console.error('Error fetching TV show details:', error);
+        return null;
+    }
+}
+
+async function getMediaDetails(mediaId, mediaType) {
+    return mediaType === 'tv' ? getTVDetails(mediaId) : getMovieDetails(mediaId);
 }
 
 // ============= Browse Movies & TV Shows =============
@@ -437,8 +460,8 @@ function renderBrowseResults(results, year = null, mediaType = 'movie') {
         // Handle both movies and TV shows (different field names)
         const title = item.title || item.name;
         const releaseDate = item.release_date || item.first_air_date;
-        const isInWatchlist = movies.watchlist.some(m => m.id === item.id);
-        const isWatched = movies.watched.some(m => m.id === item.id);
+        const isInWatchlist = movies.watchlist.some(m => m.id === item.id && m.mediaType === mediaType);
+        const isWatched = movies.watched.some(m => m.id === item.id && m.mediaType === mediaType);
 
         const card = document.createElement('div');
         card.className = 'movie-card';
@@ -455,109 +478,108 @@ function renderBrowseResults(results, year = null, mediaType = 'movie') {
                     ⭐ ${item.vote_average ? item.vote_average.toFixed(1) : 'N/A'}/10
                 </div>
                 <div class="movie-actions">
-                    ${mediaType === 'movie' ? `
-                        ${!isInWatchlist && !isWatched ?
-                            `<button class="btn btn-primary btn-small" onclick="addToWatchlist(${item.id})">+ Watchlist</button>` :
-                            ''}
-                        ${!isWatched ?
-                            `<button class="btn btn-secondary btn-small" onclick="addToWatched(${item.id})">✓ Watched</button>` :
-                            '<span style="color: var(--success); font-size: 12px;">✓ In Collection</span>'}
-                    ` : `
-                        <span style="font-size: 12px; color: var(--text-secondary);">TV Show</span>
-                    `}
+                    ${!isInWatchlist && !isWatched ?
+                        `<button class="btn btn-primary btn-small" onclick="addToWatchlist(${item.id}, '${mediaType}')">+ Watchlist</button>` :
+                        ''}
+                    ${!isWatched ?
+                        `<button class="btn btn-secondary btn-small" onclick="addToWatched(${item.id}, '${mediaType}')">✓ Watched</button>` :
+                        '<span style="color: var(--success); font-size: 12px;">✓ In Collection</span>'}
                 </div>
             </div>
         `;
 
-        // Only allow clicking for movies for now
-        if (mediaType === 'movie') {
-            card.querySelector('.movie-poster').addEventListener('click', () => showMovieDetail(item.id));
-        }
+        card.querySelector('.movie-poster').addEventListener('click', () => showMediaDetail(item.id, null, mediaType));
         grid.appendChild(card);
     });
 }
 
 // ============= Movie Management =============
 
-async function addToWatchlist(movieId) {
-    if (movies.watchlist.some(m => m.id === movieId)) {
+async function addToWatchlist(mediaId, mediaType = 'movie') {
+    if (movies.watchlist.some(m => m.id === mediaId && m.mediaType === mediaType)) {
         showToast('Already in watchlist');
         return;
     }
 
-    const movieDetails = await getMovieDetails(movieId);
-    if (!movieDetails) {
-        showToast('Error adding movie');
+    const details = await getMediaDetails(mediaId, mediaType);
+    if (!details) {
+        showToast(`Error adding ${mediaType === 'tv' ? 'show' : 'movie'}`);
         return;
     }
 
-    const movie = {
-        id: movieDetails.id,
-        title: movieDetails.title,
-        poster_path: movieDetails.poster_path,
-        backdrop_path: movieDetails.backdrop_path,
-        release_date: movieDetails.release_date,
-        overview: movieDetails.overview,
-        genres: movieDetails.genres,
-        runtime: movieDetails.runtime,
-        vote_average: movieDetails.vote_average,
-        tagline: movieDetails.tagline,
-        cast: movieDetails.credits?.cast?.slice(0, 10) || [],
-        crew: movieDetails.credits?.crew?.filter(c => c.job === 'Director' || c.job === 'Writer' || c.job === 'Producer').slice(0, 5) || [],
+    const item = {
+        id: details.id,
+        mediaType: mediaType,
+        title: details.title || details.name,
+        poster_path: details.poster_path,
+        backdrop_path: details.backdrop_path,
+        release_date: details.release_date || details.first_air_date,
+        overview: details.overview,
+        genres: details.genres,
+        runtime: details.runtime || details.episode_run_time?.[0],
+        vote_average: details.vote_average,
+        tagline: details.tagline,
+        cast: details.credits?.cast?.slice(0, 10) || [],
+        crew: details.credits?.crew?.filter(c => c.job === 'Director' || c.job === 'Writer' || c.job === 'Producer' || c.job === 'Creator').slice(0, 5) || [],
+        watchProviders: details['watch/providers']?.results?.US,
+        externalIds: details.external_ids,
         addedDate: new Date().toISOString()
     };
 
-    movies.watchlist.push(movie);
+    movies.watchlist.push(item);
     saveMoviesToStorage();
     updateCounts();
-    showToast(`Added "${movie.title}" to watchlist`);
+    showToast(`Added "${item.title}" to watchlist`);
 }
 
-async function addToWatched(movieId) {
+async function addToWatched(mediaId, mediaType = 'movie') {
     // Remove from watchlist if present
-    movies.watchlist = movies.watchlist.filter(m => m.id !== movieId);
+    movies.watchlist = movies.watchlist.filter(m => !(m.id === mediaId && m.mediaType === mediaType));
 
-    if (movies.watched.some(m => m.id === movieId)) {
+    if (movies.watched.some(m => m.id === mediaId && m.mediaType === mediaType)) {
         showToast('Already in watched list');
         return;
     }
 
-    const movieDetails = await getMovieDetails(movieId);
-    if (!movieDetails) {
-        showToast('Error adding movie');
+    const details = await getMediaDetails(mediaId, mediaType);
+    if (!details) {
+        showToast(`Error adding ${mediaType === 'tv' ? 'show' : 'movie'}`);
         return;
     }
 
-    const movie = {
-        id: movieDetails.id,
-        title: movieDetails.title,
-        poster_path: movieDetails.poster_path,
-        backdrop_path: movieDetails.backdrop_path,
-        release_date: movieDetails.release_date,
-        overview: movieDetails.overview,
-        genres: movieDetails.genres,
-        runtime: movieDetails.runtime,
-        vote_average: movieDetails.vote_average,
-        tagline: movieDetails.tagline,
-        cast: movieDetails.credits?.cast?.slice(0, 10) || [],
-        crew: movieDetails.credits?.crew?.filter(c => c.job === 'Director' || c.job === 'Writer' || c.job === 'Producer').slice(0, 5) || [],
+    const item = {
+        id: details.id,
+        mediaType: mediaType,
+        title: details.title || details.name,
+        poster_path: details.poster_path,
+        backdrop_path: details.backdrop_path,
+        release_date: details.release_date || details.first_air_date,
+        overview: details.overview,
+        genres: details.genres,
+        runtime: details.runtime || details.episode_run_time?.[0],
+        vote_average: details.vote_average,
+        tagline: details.tagline,
+        cast: details.credits?.cast?.slice(0, 10) || [],
+        crew: details.credits?.crew?.filter(c => c.job === 'Director' || c.job === 'Writer' || c.job === 'Producer' || c.job === 'Creator').slice(0, 5) || [],
+        watchProviders: details['watch/providers']?.results?.US,
+        externalIds: details.external_ids,
         watchedDate: new Date().toISOString(),
         rating: 0,
         review: ''
     };
 
-    movies.watched.push(movie);
+    movies.watched.push(item);
     saveMoviesToStorage();
     updateCounts();
     updateStats();
-    showToast(`Marked "${movie.title}" as watched`);
+    showToast(`Marked "${item.title}" as watched`);
 }
 
-function moveToWatched(movieId) {
-    const movie = movies.watchlist.find(m => m.id === movieId);
+function moveToWatched(movieId, mediaType = 'movie') {
+    const movie = movies.watchlist.find(m => m.id === movieId && m.mediaType === mediaType);
     if (!movie) return;
 
-    movies.watchlist = movies.watchlist.filter(m => m.id !== movieId);
+    movies.watchlist = movies.watchlist.filter(m => !(m.id === movieId && m.mediaType === mediaType));
     movie.watchedDate = new Date().toISOString();
     movie.rating = 0;
     movie.review = '';
@@ -570,22 +592,22 @@ function moveToWatched(movieId) {
     showToast(`Marked "${movie.title}" as watched`);
 }
 
-function removeFromWatchlist(movieId) {
-    const movie = movies.watchlist.find(m => m.id === movieId);
+function removeFromWatchlist(movieId, mediaType = 'movie') {
+    const movie = movies.watchlist.find(m => m.id === movieId && m.mediaType === mediaType);
     if (!movie) return;
 
-    movies.watchlist = movies.watchlist.filter(m => m.id !== movieId);
+    movies.watchlist = movies.watchlist.filter(m => !(m.id === movieId && m.mediaType === mediaType));
     saveMoviesToStorage();
     updateCounts();
     renderWatchlist();
     showToast(`Removed "${movie.title}" from watchlist`);
 }
 
-function removeFromWatched(movieId) {
-    const movie = movies.watched.find(m => m.id === movieId);
+function removeFromWatched(movieId, mediaType = 'movie') {
+    const movie = movies.watched.find(m => m.id === movieId && m.mediaType === mediaType);
     if (!movie) return;
 
-    movies.watched = movies.watched.filter(m => m.id !== movieId);
+    movies.watched = movies.watched.filter(m => !(m.id === movieId && m.mediaType === mediaType));
     saveMoviesToStorage();
     updateCounts();
     updateStats();
@@ -680,6 +702,8 @@ function createMovieCard(movie, listType) {
     card.className = 'movie-card';
 
     const year = movie.release_date ? movie.release_date.split('-')[0] : 'N/A';
+    const mediaType = movie.mediaType || 'movie';
+    const mediaLabel = mediaType === 'tv' ? 'TV' : '';
 
     card.innerHTML = `
         <img
@@ -689,7 +713,7 @@ function createMovieCard(movie, listType) {
         />
         <div class="movie-info">
             <div class="movie-title" title="${movie.title}">${movie.title}</div>
-            <div class="movie-year">${year}</div>
+            <div class="movie-year">${year} ${mediaLabel}</div>
 
             ${listType === 'watched' ? `
                 <div class="rating-display">
@@ -702,17 +726,17 @@ function createMovieCard(movie, listType) {
 
             <div class="movie-actions">
                 ${listType === 'watchlist' ? `
-                    <button class="btn btn-secondary btn-small" onclick="moveToWatched(${movie.id})">✓ Watched</button>
-                    <button class="btn btn-danger btn-small" onclick="removeFromWatchlist(${movie.id})">Remove</button>
+                    <button class="btn btn-secondary btn-small" onclick="moveToWatched(${movie.id}, '${mediaType}')">✓ Watched</button>
+                    <button class="btn btn-danger btn-small" onclick="removeFromWatchlist(${movie.id}, '${mediaType}')">Remove</button>
                 ` : `
-                    <button class="btn btn-primary btn-small" onclick="openRatingModal(${movie.id})">Rate</button>
-                    <button class="btn btn-danger btn-small" onclick="removeFromWatched(${movie.id})">Remove</button>
+                    <button class="btn btn-primary btn-small" onclick="openRatingModal(${movie.id}, '${mediaType}')">Rate</button>
+                    <button class="btn btn-danger btn-small" onclick="removeFromWatched(${movie.id}, '${mediaType}')">Remove</button>
                 `}
             </div>
         </div>
     `;
 
-    card.querySelector('.movie-poster').addEventListener('click', () => showMovieDetail(movie.id, listType));
+    card.querySelector('.movie-poster').addEventListener('click', () => showMediaDetail(movie.id, listType, mediaType));
     return card;
 }
 
@@ -736,44 +760,99 @@ function createStarDisplay(rating) {
 
 // ============= Movie Detail Modal =============
 
-function showMovieDetail(movieId, listType = null) {
-    let movie;
+function showMediaDetail(mediaId, listType = null, mediaType = 'movie') {
+    let item;
 
     if (listType === 'watchlist') {
-        movie = movies.watchlist.find(m => m.id === movieId);
+        item = movies.watchlist.find(m => m.id === mediaId && m.mediaType === mediaType);
     } else if (listType === 'watched') {
-        movie = movies.watched.find(m => m.id === movieId);
+        item = movies.watched.find(m => m.id === mediaId && m.mediaType === mediaType);
     }
 
-    // If movie not in lists, fetch from search results
-    if (!movie) {
-        getMovieDetails(movieId).then(movieDetails => {
-            if (movieDetails) {
-                displayMovieModal(movieDetails, listType);
+    // If item not in lists, fetch from API
+    if (!item) {
+        getMediaDetails(mediaId, mediaType).then(details => {
+            if (details) {
+                // Add mediaType to the details object
+                details.mediaType = mediaType;
+                displayMovieModal(details, listType);
             }
         });
         return;
     }
 
-    displayMovieModal(movie, listType);
+    displayMovieModal(item, listType);
+}
+
+// Keep old function for backwards compatibility
+function showMovieDetail(movieId, listType = null) {
+    showMediaDetail(movieId, listType, 'movie');
 }
 
 function displayMovieModal(movie, listType) {
     const modalBody = document.getElementById('modal-body');
-    const year = movie.release_date ? movie.release_date.split('-')[0] : 'N/A';
+    const mediaType = movie.mediaType || 'movie';
+    const title = movie.title || movie.name;
+    const year = (movie.release_date || movie.first_air_date) ? (movie.release_date || movie.first_air_date).split('-')[0] : 'N/A';
     const runtime = movie.runtime ? `${movie.runtime} min` : 'N/A';
+
+    // Build external links
+    const tmdbLink = `https://www.themoviedb.org/${mediaType}/${movie.id}`;
+    const imdbLink = movie.externalIds?.imdb_id ? `https://www.imdb.com/title/${movie.externalIds.imdb_id}` : null;
+
+    // Build streaming providers HTML
+    let streamingHTML = '';
+    if (movie.watchProviders) {
+        const providers = [];
+        if (movie.watchProviders.flatrate) providers.push(...movie.watchProviders.flatrate);
+        if (movie.watchProviders.buy) providers.push(...movie.watchProviders.buy);
+        if (movie.watchProviders.rent) providers.push(...movie.watchProviders.rent);
+
+        // Remove duplicates
+        const uniqueProviders = [...new Map(providers.map(p => [p.provider_id, p])).values()];
+
+        if (uniqueProviders.length > 0) {
+            streamingHTML = `
+                <div class="modal-section">
+                    <strong>Where to Watch (US):</strong>
+                    <div class="streaming-providers">
+                        ${uniqueProviders.map(provider => `
+                            <div class="provider-item" title="${provider.provider_name}">
+                                <img
+                                    src="${TMDB_IMAGE_BASE.replace('w500', 'w92')}${provider.logo_path}"
+                                    alt="${provider.provider_name}"
+                                    class="provider-logo"
+                                />
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            `;
+        }
+    }
 
     modalBody.innerHTML = `
         <div class="modal-header">
             <img
                 src="${movie.poster_path ? TMDB_IMAGE_BASE + movie.poster_path : 'https://via.placeholder.com/500x750?text=No+Poster'}"
-                alt="${movie.title}"
+                alt="${title}"
                 class="modal-poster"
             />
             <div class="modal-info">
-                <h2 class="modal-title">${movie.title}</h2>
+                <h2 class="modal-title">${title}</h2>
                 <div class="modal-meta">
                     ${year} • ${runtime} ${movie.vote_average ? `• ⭐ ${movie.vote_average.toFixed(1)}/10 TMDB` : ''}
+                </div>
+
+                <div class="external-links">
+                    <a href="${tmdbLink}" target="_blank" class="external-link" title="View on TMDB">
+                        🎬 TMDB
+                    </a>
+                    ${imdbLink ? `
+                        <a href="${imdbLink}" target="_blank" class="external-link" title="View on IMDb">
+                            ⭐ IMDb
+                        </a>
+                    ` : ''}
                 </div>
 
                 ${movie.genres && movie.genres.length > 0 ? `
@@ -808,6 +887,8 @@ function displayMovieModal(movie, listType) {
             <strong>Overview:</strong><br>
             ${movie.overview || 'No overview available.'}
         </div>
+
+        ${streamingHTML}
 
         ${movie.crew && movie.crew.length > 0 ? `
             <div class="modal-section">
@@ -850,8 +931,8 @@ function displayMovieModal(movie, listType) {
     document.getElementById('movie-modal').classList.add('active');
 }
 
-function openRatingModal(movieId) {
-    showMovieDetail(movieId, 'watched');
+function openRatingModal(movieId, mediaType = 'movie') {
+    showMediaDetail(movieId, 'watched', mediaType);
 }
 
 function closeModal() {
