@@ -195,11 +195,7 @@ body {
 }
 
 .browse-filters {
-    display: flex;
-    gap: 10px;
     margin-bottom: 30px;
-    flex-wrap: wrap;
-    align-items: center;
 }
 
 .filter-btn {

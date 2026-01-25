@@ -41,16 +41,24 @@
                 <h2>Browse Movies</h2>
 
                 <div class="browse-filters">
-                    <button class="filter-btn active" data-filter="popular">Popular Now</button>
-                    <button class="filter-btn" data-filter="top_rated">Top Rated</button>
-                    <button class="filter-btn" data-filter="trending">Trending</button>
-                    <button class="filter-btn" data-filter="by_year">By Year</button>
-                    <select id="genre-filter" class="genre-filter">
-                        <option value="">All Genres</option>
-                    </select>
-                    <select id="year-filter" class="genre-filter" style="display: none;">
-                        <option value="">Select Year</option>
-                    </select>
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 10px;">
+                        <button class="filter-btn active" data-filter="popular">Popular Now</button>
+                        <button class="filter-btn" data-filter="top_rated">Top Rated</button>
+                        <button class="filter-btn" data-filter="trending">Trending</button>
+                        <button class="filter-btn" data-filter="by_year">By Year</button>
+                    </div>
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
+                        <select id="media-type-filter" class="genre-filter">
+                            <option value="movie">Movies</option>
+                            <option value="tv">TV Shows</option>
+                        </select>
+                        <select id="genre-filter" class="genre-filter">
+                            <option value="">All Genres</option>
+                        </select>
+                        <select id="year-filter" class="genre-filter" style="display: none;">
+                            <option value="">Select Year</option>
+                        </select>
+                    </div>
                 </div>
 
                 <div class="browse-results" id="browse-results"></div>

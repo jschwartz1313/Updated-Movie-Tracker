@@ -60,6 +60,10 @@ function initializeEventListeners() {
     });
     document.getElementById('genre-filter').addEventListener('change', () => loadBrowseMovies());
     document.getElementById('year-filter').addEventListener('change', () => loadBrowseMovies());
+    document.getElementById('media-type-filter').addEventListener('change', async () => {
+        await updateGenresForMediaType();
+        loadBrowseMovies();
+    });
 
     // Theme toggle
     document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
@@ -206,26 +210,52 @@ async function getMovieDetails(movieId) {
     }
 }
 
-// ============= Browse Movies =============
+// ============= Browse Movies & TV Shows =============
 
-let genresCache = null;
+let movieGenresCache = null;
+let tvGenresCache = null;
 
-async function fetchGenres() {
-    if (genresCache) return genresCache;
+async function fetchGenres(mediaType = 'movie') {
+    const cache = mediaType === 'tv' ? tvGenresCache : movieGenresCache;
+    if (cache) return cache;
 
     if (!TMDB_API_KEY) return [];
 
     try {
         const response = await fetch(
-            `${TMDB_BASE_URL}/genre/movie/list?api_key=${TMDB_API_KEY}`
+            `${TMDB_BASE_URL}/genre/${mediaType}/list?api_key=${TMDB_API_KEY}`
         );
         const data = await response.json();
-        genresCache = data.genres || [];
-        return genresCache;
+        const genres = data.genres || [];
+
+        if (mediaType === 'tv') {
+            tvGenresCache = genres;
+        } else {
+            movieGenresCache = genres;
+        }
+
+        return genres;
     } catch (error) {
         console.error('Error fetching genres:', error);
         return [];
     }
+}
+
+async function updateGenresForMediaType() {
+    const mediaType = document.getElementById('media-type-filter').value;
+    const genreFilter = document.getElementById('genre-filter');
+
+    // Clear current options except "All Genres"
+    genreFilter.innerHTML = '<option value="">All Genres</option>';
+
+    // Load genres for the selected media type
+    const genres = await fetchGenres(mediaType);
+    genres.forEach(genre => {
+        const option = document.createElement('option');
+        option.value = genre.id;
+        option.textContent = genre.name;
+        genreFilter.appendChild(option);
+    });
 }
 
 async function initializeBrowse() {
@@ -233,7 +263,7 @@ async function initializeBrowse() {
     const genreFilter = document.getElementById('genre-filter');
 
     if (genreFilter.options.length === 1) { // Only has "All Genres"
-        const genres = await fetchGenres();
+        const genres = await fetchGenres('movie'); // Default to movies
         genres.forEach(genre => {
             const option = document.createElement('option');
             option.value = genre.id;
@@ -254,7 +284,7 @@ async function initializeBrowse() {
         }
     }
 
-    // Load default movies (popular)
+    // Load default content (popular movies)
     loadBrowseMovies('popular');
 }
 
@@ -263,34 +293,37 @@ async function loadBrowseMovies(filter) {
     const activeFilter = filter || document.querySelector('.filter-btn.active').dataset.filter;
     const genreId = document.getElementById('genre-filter').value;
     const selectedYear = document.getElementById('year-filter').value;
+    const mediaType = document.getElementById('media-type-filter').value;
+
+    const mediaLabel = mediaType === 'tv' ? 'TV shows' : 'movies';
 
     if (!TMDB_API_KEY) {
         resultsContainer.innerHTML = `
             <div class="empty-state">
                 <div class="empty-state-icon">🔑</div>
-                <div class="empty-state-text">Please add your TMDB API key to browse movies.</div>
+                <div class="empty-state-text">Please add your TMDB API key to browse ${mediaLabel}.</div>
             </div>
         `;
         return;
     }
 
-    resultsContainer.innerHTML = '<div class="loading"><div class="spinner"></div>Loading movies...</div>';
+    resultsContainer.innerHTML = `<div class="loading"><div class="spinner"></div>Loading ${mediaLabel}...</div>`;
 
     try {
         let results = [];
 
         switch(activeFilter) {
             case 'trending':
-                // Trending doesn't support genre filtering via API
-                const trendingUrl = `${TMDB_BASE_URL}/trending/movie/week?api_key=${TMDB_API_KEY}`;
+                // Trending supports both movies and TV
+                const trendingUrl = `${TMDB_BASE_URL}/trending/${mediaType}/week?api_key=${TMDB_API_KEY}`;
                 const trendingResponse = await fetch(trendingUrl);
                 const trendingData = await trendingResponse.json();
                 results = trendingData.results || [];
 
                 // Filter by genre client-side if needed
                 if (genreId) {
-                    results = results.filter(movie =>
-                        movie.genre_ids && movie.genre_ids.includes(parseInt(genreId))
+                    results = results.filter(item =>
+                        item.genre_ids && item.genre_ids.includes(parseInt(genreId))
                     );
                 }
                 break;
@@ -300,19 +333,28 @@ async function loadBrowseMovies(filter) {
                     resultsContainer.innerHTML = `
                         <div class="empty-state">
                             <div class="empty-state-icon">📅</div>
-                            <div class="empty-state-text">Please select a year to browse top-rated movies</div>
+                            <div class="empty-state-text">Please select a year to browse top-rated ${mediaLabel}</div>
                         </div>
                     `;
                     return;
                 }
 
-                // Fetch top 50 movies from the selected year
-                // Fetch multiple pages to get top 50
-                for (let page = 1; page <= 3; page++) {
-                    let discoverUrl = `${TMDB_BASE_URL}/discover/movie?api_key=${TMDB_API_KEY}`;
-                    discoverUrl += `&primary_release_year=${selectedYear}`;
+                // Fetch top 100 from the selected year with quality filtering
+                // Fetch multiple pages to get top 100
+                for (let page = 1; page <= 5; page++) {
+                    let discoverUrl = `${TMDB_BASE_URL}/discover/${mediaType}?api_key=${TMDB_API_KEY}`;
+
+                    // Different date fields for movies vs TV
+                    if (mediaType === 'tv') {
+                        discoverUrl += `&first_air_date_year=${selectedYear}`;
+                        discoverUrl += `&vote_count.gte=50`; // TV shows typically have fewer votes
+                    } else {
+                        discoverUrl += `&primary_release_year=${selectedYear}`;
+                        discoverUrl += `&vote_count.gte=200`; // Higher threshold for movies to ensure quality
+                    }
+
                     discoverUrl += `&sort_by=vote_average.desc`;
-                    discoverUrl += `&vote_count.gte=100`; // Only movies with at least 100 votes
+                    discoverUrl += `&vote_average.gte=6.0`; // Only items rated 6.0 or higher
                     if (genreId) discoverUrl += `&with_genres=${genreId}`;
                     discoverUrl += `&page=${page}`;
 
@@ -320,16 +362,17 @@ async function loadBrowseMovies(filter) {
                     const data = await response.json();
                     results = results.concat(data.results || []);
 
-                    if (results.length >= 50) break;
+                    if (results.length >= 100) break;
                 }
-                results = results.slice(0, 50); // Take top 50
+                results = results.slice(0, 100); // Take top 100
                 break;
 
             case 'top_rated':
                 // Use discover for better filtering
-                let topRatedUrl = `${TMDB_BASE_URL}/discover/movie?api_key=${TMDB_API_KEY}`;
+                let topRatedUrl = `${TMDB_BASE_URL}/discover/${mediaType}?api_key=${TMDB_API_KEY}`;
                 topRatedUrl += `&sort_by=vote_average.desc`;
-                topRatedUrl += `&vote_count.gte=1000`; // Only well-reviewed movies
+                topRatedUrl += mediaType === 'tv' ? `&vote_count.gte=500` : `&vote_count.gte=1000`;
+                topRatedUrl += `&vote_average.gte=7.0`; // Only highly rated content
                 if (genreId) topRatedUrl += `&with_genres=${genreId}`;
 
                 const topRatedResponse = await fetch(topRatedUrl);
@@ -340,7 +383,7 @@ async function loadBrowseMovies(filter) {
             case 'popular':
             default:
                 // Use discover for consistent filtering
-                let popularUrl = `${TMDB_BASE_URL}/discover/movie?api_key=${TMDB_API_KEY}`;
+                let popularUrl = `${TMDB_BASE_URL}/discover/${mediaType}?api_key=${TMDB_API_KEY}`;
                 popularUrl += `&sort_by=popularity.desc`;
                 if (genreId) popularUrl += `&with_genres=${genreId}`;
 
@@ -351,12 +394,12 @@ async function loadBrowseMovies(filter) {
         }
 
         if (results.length > 0) {
-            renderBrowseResults(results, activeFilter === 'by_year' ? selectedYear : null);
+            renderBrowseResults(results, activeFilter === 'by_year' ? selectedYear : null, mediaType);
         } else {
             resultsContainer.innerHTML = `
                 <div class="empty-state">
                     <div class="empty-state-icon">🎬</div>
-                    <div class="empty-state-text">No movies found</div>
+                    <div class="empty-state-text">No ${mediaLabel} found</div>
                 </div>
             `;
         }
@@ -365,60 +408,71 @@ async function loadBrowseMovies(filter) {
         resultsContainer.innerHTML = `
             <div class="empty-state">
                 <div class="empty-state-icon">❌</div>
-                <div class="empty-state-text">Error loading movies. Please try again.</div>
+                <div class="empty-state-text">Error loading ${mediaLabel}. Please try again.</div>
             </div>
         `;
-        showToast('Error loading movies');
+        showToast(`Error loading ${mediaLabel}`);
     }
 }
 
-function renderBrowseResults(results, year = null) {
+function renderBrowseResults(results, year = null, mediaType = 'movie') {
     const container = document.getElementById('browse-results');
+    const mediaLabel = mediaType === 'tv' ? 'TV shows' : 'movies';
 
     // Add header showing count and year if applicable
     let headerHTML = '';
     if (year) {
         headerHTML = `<div style="margin-bottom: 20px; color: var(--text-secondary);">
-            Showing top ${results.length} movies from ${year}
+            Showing top ${results.length} ${mediaLabel} from ${year}
         </div>`;
     }
 
     container.innerHTML = headerHTML + '<div class="movie-grid"></div>';
     const grid = container.querySelector('.movie-grid');
 
-    // Show all results for by_year (up to 50), otherwise limit to 20
+    // Show all results for by_year (up to 100), otherwise limit to 20
     const displayResults = year ? results : results.slice(0, 20);
 
-    displayResults.forEach(movie => {
-        const isInWatchlist = movies.watchlist.some(m => m.id === movie.id);
-        const isWatched = movies.watched.some(m => m.id === movie.id);
+    displayResults.forEach(item => {
+        // Handle both movies and TV shows (different field names)
+        const title = item.title || item.name;
+        const releaseDate = item.release_date || item.first_air_date;
+        const isInWatchlist = movies.watchlist.some(m => m.id === item.id);
+        const isWatched = movies.watched.some(m => m.id === item.id);
 
         const card = document.createElement('div');
         card.className = 'movie-card';
         card.innerHTML = `
             <img
-                src="${movie.poster_path ? TMDB_IMAGE_BASE + movie.poster_path : 'https://via.placeholder.com/500x750?text=No+Poster'}"
-                alt="${movie.title}"
+                src="${item.poster_path ? TMDB_IMAGE_BASE + item.poster_path : 'https://via.placeholder.com/500x750?text=No+Poster'}"
+                alt="${title}"
                 class="movie-poster"
             />
             <div class="movie-info">
-                <div class="movie-title">${movie.title}</div>
-                <div class="movie-year">${movie.release_date ? movie.release_date.split('-')[0] : 'N/A'}</div>
+                <div class="movie-title">${title}</div>
+                <div class="movie-year">${releaseDate ? releaseDate.split('-')[0] : 'N/A'}</div>
                 <div style="margin: 5px 0; font-size: 13px; color: var(--text-secondary);">
-                    ⭐ ${movie.vote_average ? movie.vote_average.toFixed(1) : 'N/A'}/10
+                    ⭐ ${item.vote_average ? item.vote_average.toFixed(1) : 'N/A'}/10
                 </div>
                 <div class="movie-actions">
-                    ${!isInWatchlist && !isWatched ?
-                        `<button class="btn btn-primary btn-small" onclick="addToWatchlist(${movie.id})">+ Watchlist</button>` :
-                        ''}
-                    ${!isWatched ?
-                        `<button class="btn btn-secondary btn-small" onclick="addToWatched(${movie.id})">✓ Watched</button>` :
-                        '<span style="color: var(--success); font-size: 12px;">✓ In Collection</span>'}
+                    ${mediaType === 'movie' ? `
+                        ${!isInWatchlist && !isWatched ?
+                            `<button class="btn btn-primary btn-small" onclick="addToWatchlist(${item.id})">+ Watchlist</button>` :
+                            ''}
+                        ${!isWatched ?
+                            `<button class="btn btn-secondary btn-small" onclick="addToWatched(${item.id})">✓ Watched</button>` :
+                            '<span style="color: var(--success); font-size: 12px;">✓ In Collection</span>'}
+                    ` : `
+                        <span style="font-size: 12px; color: var(--text-secondary);">TV Show</span>
+                    `}
                 </div>
             </div>
         `;
 
-        card.querySelector('.movie-poster').addEventListener('click', () => showMovieDetail(movie.id));
+        // Only allow clicking for movies for now
+        if (mediaType === 'movie') {
+            card.querySelector('.movie-poster').addEventListener('click', () => showMovieDetail(item.id));
+        }
         grid.appendChild(card);
     });
 }
