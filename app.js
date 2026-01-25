@@ -109,6 +109,36 @@ function switchView(viewName) {
     }
 }
 
+function refreshCurrentView() {
+    const activeNav = document.querySelector('.nav-btn.active');
+    if (!activeNav) return;
+
+    const currentView = activeNav.dataset.view;
+    switch(currentView) {
+        case 'search':
+            // Re-render search results if they exist
+            const searchResults = document.getElementById('search-results');
+            if (searchResults.querySelector('.movie-grid')) {
+                // Search results exist, but we don't need to re-fetch
+                // The buttons will update on next search
+            }
+            break;
+        case 'browse':
+            // Re-render browse results
+            loadBrowseMovies();
+            break;
+        case 'watchlist':
+            renderWatchlist();
+            break;
+        case 'watched':
+            renderWatched();
+            break;
+        case 'stats':
+            updateStats();
+            break;
+    }
+}
+
 // ============= TMDB API Integration =============
 
 async function searchMovies() {
@@ -530,6 +560,9 @@ async function addToWatchlist(mediaId, mediaType = 'movie') {
     saveMoviesToStorage();
     updateCounts();
     showToast(`Added "${item.title}" to watchlist`);
+
+    // Refresh the current view to update button states
+    refreshCurrentView();
 }
 
 async function addToWatched(mediaId, mediaType = 'movie') {
@@ -573,6 +606,9 @@ async function addToWatched(mediaId, mediaType = 'movie') {
     updateCounts();
     updateStats();
     showToast(`Marked "${item.title}" as watched`);
+
+    // Refresh the current view to update button states
+    refreshCurrentView();
 }
 
 function moveToWatched(movieId, mediaType = 'movie') {
@@ -615,8 +651,8 @@ function removeFromWatched(movieId, mediaType = 'movie') {
     showToast(`Removed "${movie.title}" from watched list`);
 }
 
-function rateMovie(movieId, rating) {
-    const movie = movies.watched.find(m => m.id === movieId);
+function rateMovie(movieId, rating, mediaType = 'movie') {
+    const movie = movies.watched.find(m => m.id === movieId && m.mediaType === mediaType);
     if (!movie) return;
 
     movie.rating = rating;
@@ -866,7 +902,7 @@ function displayMovieModal(movie, listType) {
                         <strong>Your Rating:</strong>
                         <div class="star-rating" id="modal-rating">
                             ${[1,2,3,4,5,6,7,8,9,10].map(i =>
-                                `<span class="star ${i <= (movie.rating || 0) ? 'active' : ''}" onclick="rateMovie(${movie.id}, ${i})">★</span>`
+                                `<span class="star ${i <= (movie.rating || 0) ? 'active' : ''}" onclick="rateMovie(${movie.id}, ${i}, '${mediaType}')">★</span>`
                             ).join('')}
                         </div>
                         <div style="margin-top: 5px; font-size: 14px; color: var(--text-secondary);">
