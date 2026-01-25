@@ -174,7 +174,7 @@ async function getMovieDetails(movieId) {
 
     try {
         const response = await fetch(
-            `${TMDB_BASE_URL}/movie/${movieId}?api_key=${TMDB_API_KEY}`
+            `${TMDB_BASE_URL}/movie/${movieId}?api_key=${TMDB_API_KEY}&append_to_response=credits`
         );
         return await response.json();
     } catch (error) {
@@ -201,11 +201,15 @@ async function addToWatchlist(movieId) {
         id: movieDetails.id,
         title: movieDetails.title,
         poster_path: movieDetails.poster_path,
+        backdrop_path: movieDetails.backdrop_path,
         release_date: movieDetails.release_date,
         overview: movieDetails.overview,
         genres: movieDetails.genres,
         runtime: movieDetails.runtime,
         vote_average: movieDetails.vote_average,
+        tagline: movieDetails.tagline,
+        cast: movieDetails.credits?.cast?.slice(0, 10) || [],
+        crew: movieDetails.credits?.crew?.filter(c => c.job === 'Director' || c.job === 'Writer' || c.job === 'Producer').slice(0, 5) || [],
         addedDate: new Date().toISOString()
     };
 
@@ -234,11 +238,15 @@ async function addToWatched(movieId) {
         id: movieDetails.id,
         title: movieDetails.title,
         poster_path: movieDetails.poster_path,
+        backdrop_path: movieDetails.backdrop_path,
         release_date: movieDetails.release_date,
         overview: movieDetails.overview,
         genres: movieDetails.genres,
         runtime: movieDetails.runtime,
         vote_average: movieDetails.vote_average,
+        tagline: movieDetails.tagline,
+        cast: movieDetails.credits?.cast?.slice(0, 10) || [],
+        crew: movieDetails.credits?.crew?.filter(c => c.job === 'Director' || c.job === 'Writer' || c.job === 'Producer').slice(0, 5) || [],
         watchedDate: new Date().toISOString(),
         rating: 0,
         review: ''
@@ -496,10 +504,53 @@ function displayMovieModal(movie, listType) {
             </div>
         </div>
 
+        ${movie.tagline ? `
+            <div class="modal-tagline">
+                <em>"${movie.tagline}"</em>
+            </div>
+        ` : ''}
+
         <div class="modal-overview">
             <strong>Overview:</strong><br>
             ${movie.overview || 'No overview available.'}
         </div>
+
+        ${movie.crew && movie.crew.length > 0 ? `
+            <div class="modal-section">
+                <strong>Crew:</strong>
+                <div class="crew-list">
+                    ${movie.crew.map(person => `
+                        <div class="crew-item">
+                            <span class="crew-name">${person.name}</span>
+                            <span class="crew-role">${person.job}</span>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>
+        ` : ''}
+
+        ${movie.cast && movie.cast.length > 0 ? `
+            <div class="modal-section">
+                <strong>Cast:</strong>
+                <div class="cast-list">
+                    ${movie.cast.map(actor => `
+                        <div class="cast-item">
+                            ${actor.profile_path ? `
+                                <img
+                                    src="${TMDB_IMAGE_BASE.replace('w500', 'w185')}${actor.profile_path}"
+                                    alt="${actor.name}"
+                                    class="cast-photo"
+                                />
+                            ` : `<div class="cast-photo-placeholder">👤</div>`}
+                            <div class="cast-info">
+                                <div class="cast-name">${actor.name}</div>
+                                <div class="cast-character">${actor.character || 'Unknown'}</div>
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>
+        ` : ''}
     `;
 
     document.getElementById('movie-modal').classList.add('active');
