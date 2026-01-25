@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Movie Tracker</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <h1>🎬 Movie Tracker</h1>
+            <nav class="nav">
+                <button class="nav-btn active" data-view="search">Search</button>
+                <button class="nav-btn" data-view="watchlist">Watchlist <span class="badge" id="watchlist-count">0</span></button>
+                <button class="nav-btn" data-view="watched">Watched <span class="badge" id="watched-count">0</span></button>
+                <button class="nav-btn" data-view="stats">Stats</button>
+            </nav>
+            <button class="theme-toggle" id="theme-toggle" title="Toggle dark/light mode">
+                <span class="theme-icon">🌙</span>
+            </button>
+        </header>
+
+        <!-- Search View -->
+        <section class="view active" id="search-view">
+            <div class="search-container">
+                <h2>Search Movies</h2>
+                <div class="search-box">
+                    <input type="text" id="search-input" placeholder="Search for a movie..." />
+                    <button id="search-btn">Search</button>
+                </div>
+                <div class="search-results" id="search-results"></div>
+            </div>
+        </section>
+
+        <!-- Watchlist View -->
+        <section class="view" id="watchlist-view">
+            <div class="list-container">
+                <div class="list-header">
+                    <h2>My Watchlist</h2>
+                    <div class="filters">
+                        <select id="watchlist-sort">
+                            <option value="added">Recently Added</option>
+                            <option value="title">Title (A-Z)</option>
+                            <option value="year">Release Year</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="movie-grid" id="watchlist-grid"></div>
+            </div>
+        </section>
+
+        <!-- Watched View -->
+        <section class="view" id="watched-view">
+            <div class="list-container">
+                <div class="list-header">
+                    <h2>Watched Movies</h2>
+                    <div class="filters">
+                        <select id="watched-sort">
+                            <option value="rating">Highest Rated</option>
+                            <option value="date">Recently Watched</option>
+                            <option value="title">Title (A-Z)</option>
+                            <option value="year">Release Year</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="movie-grid" id="watched-grid"></div>
+            </div>
+        </section>
+
+        <!-- Stats View -->
+        <section class="view" id="stats-view">
+            <div class="stats-container">
+                <h2>Statistics</h2>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="total-movies">0</div>
+                        <div class="stat-label">Total Movies</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="total-watched">0</div>
+                        <div class="stat-label">Movies Watched</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="avg-rating">0</div>
+                        <div class="stat-label">Average Rating</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="total-hours">0</div>
+                        <div class="stat-label">Hours Watched</div>
+                    </div>
+                </div>
+
+                <div class="top-movies">
+                    <h3>Top Rated Movies</h3>
+                    <div id="top-rated-list"></div>
+                </div>
+
+                <div class="genre-stats">
+                    <h3>Favorite Genres</h3>
+                    <div id="genre-list"></div>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <!-- Movie Detail Modal -->
+    <div class="modal" id="movie-modal">
+        <div class="modal-content">
+            <button class="modal-close" id="modal-close">&times;</button>
+            <div class="modal-body" id="modal-body"></div>
+        </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div class="toast" id="toast"></div>
+
+    <script src="app.js"></script>
+</body>
+</html>
