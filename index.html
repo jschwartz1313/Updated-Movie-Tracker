@@ -13,6 +13,7 @@
             <h1>🎬 Movie Tracker</h1>
             <nav class="nav">
                 <button class="nav-btn active" data-view="search">Search</button>
+                <button class="nav-btn" data-view="browse">Browse</button>
                 <button class="nav-btn" data-view="watchlist">Watchlist <span class="badge" id="watchlist-count">0</span></button>
                 <button class="nav-btn" data-view="watched">Watched <span class="badge" id="watched-count">0</span></button>
                 <button class="nav-btn" data-view="stats">Stats</button>
@@ -31,6 +32,24 @@
                     <button id="search-btn">Search</button>
                 </div>
                 <div class="search-results" id="search-results"></div>
+            </div>
+        </section>
+
+        <!-- Browse View -->
+        <section class="view" id="browse-view">
+            <div class="browse-container">
+                <h2>Browse Movies</h2>
+
+                <div class="browse-filters">
+                    <button class="filter-btn active" data-filter="popular">Popular</button>
+                    <button class="filter-btn" data-filter="top_rated">Top Rated</button>
+                    <button class="filter-btn" data-filter="trending">Trending</button>
+                    <select id="genre-filter" class="genre-filter">
+                        <option value="">All Genres</option>
+                    </select>
+                </div>
+
+                <div class="browse-results" id="browse-results"></div>
             </div>
         </section>
 

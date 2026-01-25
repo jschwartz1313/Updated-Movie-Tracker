@@ -41,6 +41,16 @@ function initializeEventListeners() {
     document.getElementById('watchlist-sort').addEventListener('change', renderWatchlist);
     document.getElementById('watched-sort').addEventListener('change', renderWatched);
 
+    // Browse filters
+    document.querySelectorAll('.filter-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            loadBrowseMovies(btn.dataset.filter);
+        });
+    });
+    document.getElementById('genre-filter').addEventListener('change', () => loadBrowseMovies());
+
     // Theme toggle
     document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
 
@@ -66,6 +76,9 @@ function switchView(viewName) {
 
     // Render appropriate content
     switch(viewName) {
+        case 'browse':
+            initializeBrowse();
+            break;
         case 'watchlist':
             renderWatchlist();
             break;
@@ -181,6 +194,144 @@ async function getMovieDetails(movieId) {
         console.error('Error fetching movie details:', error);
         return null;
     }
+}
+
+// ============= Browse Movies =============
+
+let genresCache = null;
+
+async function fetchGenres() {
+    if (genresCache) return genresCache;
+
+    if (!TMDB_API_KEY) return [];
+
+    try {
+        const response = await fetch(
+            `${TMDB_BASE_URL}/genre/movie/list?api_key=${TMDB_API_KEY}`
+        );
+        const data = await response.json();
+        genresCache = data.genres || [];
+        return genresCache;
+    } catch (error) {
+        console.error('Error fetching genres:', error);
+        return [];
+    }
+}
+
+async function initializeBrowse() {
+    // Load genres into dropdown
+    const genreFilter = document.getElementById('genre-filter');
+
+    if (genreFilter.options.length === 1) { // Only has "All Genres"
+        const genres = await fetchGenres();
+        genres.forEach(genre => {
+            const option = document.createElement('option');
+            option.value = genre.id;
+            option.textContent = genre.name;
+            genreFilter.appendChild(option);
+        });
+    }
+
+    // Load default movies (popular)
+    loadBrowseMovies('popular');
+}
+
+async function loadBrowseMovies(filter) {
+    const resultsContainer = document.getElementById('browse-results');
+    const activeFilter = filter || document.querySelector('.filter-btn.active').dataset.filter;
+    const genreId = document.getElementById('genre-filter').value;
+
+    if (!TMDB_API_KEY) {
+        resultsContainer.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-state-icon">🔑</div>
+                <div class="empty-state-text">Please add your TMDB API key to browse movies.</div>
+            </div>
+        `;
+        return;
+    }
+
+    resultsContainer.innerHTML = '<div class="loading"><div class="spinner"></div>Loading movies...</div>';
+
+    try {
+        let url;
+        switch(activeFilter) {
+            case 'trending':
+                url = `${TMDB_BASE_URL}/trending/movie/week?api_key=${TMDB_API_KEY}`;
+                break;
+            case 'top_rated':
+                url = `${TMDB_BASE_URL}/movie/top_rated?api_key=${TMDB_API_KEY}`;
+                if (genreId) url += `&with_genres=${genreId}`;
+                break;
+            case 'popular':
+            default:
+                url = `${TMDB_BASE_URL}/movie/popular?api_key=${TMDB_API_KEY}`;
+                if (genreId) url += `&with_genres=${genreId}`;
+                break;
+        }
+
+        const response = await fetch(url);
+        const data = await response.json();
+
+        if (data.results && data.results.length > 0) {
+            renderBrowseResults(data.results);
+        } else {
+            resultsContainer.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state-icon">🎬</div>
+                    <div class="empty-state-text">No movies found</div>
+                </div>
+            `;
+        }
+    } catch (error) {
+        console.error('Browse error:', error);
+        resultsContainer.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-state-icon">❌</div>
+                <div class="empty-state-text">Error loading movies. Please try again.</div>
+            </div>
+        `;
+        showToast('Error loading movies');
+    }
+}
+
+function renderBrowseResults(results) {
+    const container = document.getElementById('browse-results');
+    container.innerHTML = '<div class="movie-grid"></div>';
+    const grid = container.querySelector('.movie-grid');
+
+    results.slice(0, 20).forEach(movie => {
+        const isInWatchlist = movies.watchlist.some(m => m.id === movie.id);
+        const isWatched = movies.watched.some(m => m.id === movie.id);
+
+        const card = document.createElement('div');
+        card.className = 'movie-card';
+        card.innerHTML = `
+            <img
+                src="${movie.poster_path ? TMDB_IMAGE_BASE + movie.poster_path : 'https://via.placeholder.com/500x750?text=No+Poster'}"
+                alt="${movie.title}"
+                class="movie-poster"
+            />
+            <div class="movie-info">
+                <div class="movie-title">${movie.title}</div>
+                <div class="movie-year">${movie.release_date ? movie.release_date.split('-')[0] : 'N/A'}</div>
+                <div style="margin: 5px 0; font-size: 13px; color: var(--text-secondary);">
+                    ⭐ ${movie.vote_average ? movie.vote_average.toFixed(1) : 'N/A'}/10
+                </div>
+                <div class="movie-actions">
+                    ${!isInWatchlist && !isWatched ?
+                        `<button class="btn btn-primary btn-small" onclick="addToWatchlist(${movie.id})">+ Watchlist</button>` :
+                        ''}
+                    ${!isWatched ?
+                        `<button class="btn btn-secondary btn-small" onclick="addToWatched(${movie.id})">✓ Watched</button>` :
+                        '<span style="color: var(--success); font-size: 12px;">✓ In Collection</span>'}
+                </div>
+            </div>
+        `;
+
+        card.querySelector('.movie-poster').addEventListener('click', () => showMovieDetail(movie.id));
+        grid.appendChild(card);
+    });
 }
 
 // ============= Movie Management =============

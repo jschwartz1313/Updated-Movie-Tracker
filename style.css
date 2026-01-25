@@ -188,6 +188,58 @@ body {
     min-height: 200px;
 }
 
+/* Browse View */
+.browse-container h2 {
+    margin-bottom: 20px;
+    font-size: 24px;
+}
+
+.browse-filters {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 30px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.filter-btn {
+    padding: 10px 20px;
+    background: var(--bg-secondary);
+    border: 2px solid var(--border);
+    color: var(--text-primary);
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 15px;
+    font-weight: 500;
+    transition: all 0.3s;
+}
+
+.filter-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.filter-btn.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: white;
+}
+
+.genre-filter {
+    padding: 10px 15px;
+    border: 2px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-card);
+    color: var(--text-primary);
+    font-size: 14px;
+    cursor: pointer;
+    min-width: 150px;
+}
+
+.browse-results {
+    min-height: 200px;
+}
+
 /* List View */
 .list-header {
     display: flex;
