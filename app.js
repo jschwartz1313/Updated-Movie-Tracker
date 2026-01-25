@@ -46,10 +46,20 @@ function initializeEventListeners() {
         btn.addEventListener('click', () => {
             document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
+
+            // Show/hide year filter
+            const yearFilter = document.getElementById('year-filter');
+            if (btn.dataset.filter === 'by_year') {
+                yearFilter.style.display = 'block';
+            } else {
+                yearFilter.style.display = 'none';
+            }
+
             loadBrowseMovies(btn.dataset.filter);
         });
     });
     document.getElementById('genre-filter').addEventListener('change', () => loadBrowseMovies());
+    document.getElementById('year-filter').addEventListener('change', () => loadBrowseMovies());
 
     // Theme toggle
     document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
@@ -232,6 +242,18 @@ async function initializeBrowse() {
         });
     }
 
+    // Load years into dropdown (last 25 years)
+    const yearFilter = document.getElementById('year-filter');
+    if (yearFilter.options.length === 1) { // Only has "Select Year"
+        const currentYear = new Date().getFullYear();
+        for (let year = currentYear; year >= currentYear - 24; year--) {
+            const option = document.createElement('option');
+            option.value = year;
+            option.textContent = year;
+            yearFilter.appendChild(option);
+        }
+    }
+
     // Load default movies (popular)
     loadBrowseMovies('popular');
 }
@@ -240,6 +262,7 @@ async function loadBrowseMovies(filter) {
     const resultsContainer = document.getElementById('browse-results');
     const activeFilter = filter || document.querySelector('.filter-btn.active').dataset.filter;
     const genreId = document.getElementById('genre-filter').value;
+    const selectedYear = document.getElementById('year-filter').value;
 
     if (!TMDB_API_KEY) {
         resultsContainer.innerHTML = `
@@ -254,27 +277,81 @@ async function loadBrowseMovies(filter) {
     resultsContainer.innerHTML = '<div class="loading"><div class="spinner"></div>Loading movies...</div>';
 
     try {
-        let url;
+        let results = [];
+
         switch(activeFilter) {
             case 'trending':
-                url = `${TMDB_BASE_URL}/trending/movie/week?api_key=${TMDB_API_KEY}`;
+                // Trending doesn't support genre filtering via API
+                const trendingUrl = `${TMDB_BASE_URL}/trending/movie/week?api_key=${TMDB_API_KEY}`;
+                const trendingResponse = await fetch(trendingUrl);
+                const trendingData = await trendingResponse.json();
+                results = trendingData.results || [];
+
+                // Filter by genre client-side if needed
+                if (genreId) {
+                    results = results.filter(movie =>
+                        movie.genre_ids && movie.genre_ids.includes(parseInt(genreId))
+                    );
+                }
                 break;
+
+            case 'by_year':
+                if (!selectedYear) {
+                    resultsContainer.innerHTML = `
+                        <div class="empty-state">
+                            <div class="empty-state-icon">📅</div>
+                            <div class="empty-state-text">Please select a year to browse top-rated movies</div>
+                        </div>
+                    `;
+                    return;
+                }
+
+                // Fetch top 50 movies from the selected year
+                // Fetch multiple pages to get top 50
+                for (let page = 1; page <= 3; page++) {
+                    let discoverUrl = `${TMDB_BASE_URL}/discover/movie?api_key=${TMDB_API_KEY}`;
+                    discoverUrl += `&primary_release_year=${selectedYear}`;
+                    discoverUrl += `&sort_by=vote_average.desc`;
+                    discoverUrl += `&vote_count.gte=100`; // Only movies with at least 100 votes
+                    if (genreId) discoverUrl += `&with_genres=${genreId}`;
+                    discoverUrl += `&page=${page}`;
+
+                    const response = await fetch(discoverUrl);
+                    const data = await response.json();
+                    results = results.concat(data.results || []);
+
+                    if (results.length >= 50) break;
+                }
+                results = results.slice(0, 50); // Take top 50
+                break;
+
             case 'top_rated':
-                url = `${TMDB_BASE_URL}/movie/top_rated?api_key=${TMDB_API_KEY}`;
-                if (genreId) url += `&with_genres=${genreId}`;
+                // Use discover for better filtering
+                let topRatedUrl = `${TMDB_BASE_URL}/discover/movie?api_key=${TMDB_API_KEY}`;
+                topRatedUrl += `&sort_by=vote_average.desc`;
+                topRatedUrl += `&vote_count.gte=1000`; // Only well-reviewed movies
+                if (genreId) topRatedUrl += `&with_genres=${genreId}`;
+
+                const topRatedResponse = await fetch(topRatedUrl);
+                const topRatedData = await topRatedResponse.json();
+                results = topRatedData.results || [];
                 break;
+
             case 'popular':
             default:
-                url = `${TMDB_BASE_URL}/movie/popular?api_key=${TMDB_API_KEY}`;
-                if (genreId) url += `&with_genres=${genreId}`;
+                // Use discover for consistent filtering
+                let popularUrl = `${TMDB_BASE_URL}/discover/movie?api_key=${TMDB_API_KEY}`;
+                popularUrl += `&sort_by=popularity.desc`;
+                if (genreId) popularUrl += `&with_genres=${genreId}`;
+
+                const popularResponse = await fetch(popularUrl);
+                const popularData = await popularResponse.json();
+                results = popularData.results || [];
                 break;
         }
 
-        const response = await fetch(url);
-        const data = await response.json();
-
-        if (data.results && data.results.length > 0) {
-            renderBrowseResults(data.results);
+        if (results.length > 0) {
+            renderBrowseResults(results, activeFilter === 'by_year' ? selectedYear : null);
         } else {
             resultsContainer.innerHTML = `
                 <div class="empty-state">
@@ -295,12 +372,24 @@ async function loadBrowseMovies(filter) {
     }
 }
 
-function renderBrowseResults(results) {
+function renderBrowseResults(results, year = null) {
     const container = document.getElementById('browse-results');
-    container.innerHTML = '<div class="movie-grid"></div>';
+
+    // Add header showing count and year if applicable
+    let headerHTML = '';
+    if (year) {
+        headerHTML = `<div style="margin-bottom: 20px; color: var(--text-secondary);">
+            Showing top ${results.length} movies from ${year}
+        </div>`;
+    }
+
+    container.innerHTML = headerHTML + '<div class="movie-grid"></div>';
     const grid = container.querySelector('.movie-grid');
 
-    results.slice(0, 20).forEach(movie => {
+    // Show all results for by_year (up to 50), otherwise limit to 20
+    const displayResults = year ? results : results.slice(0, 20);
+
+    displayResults.forEach(movie => {
         const isInWatchlist = movies.watchlist.some(m => m.id === movie.id);
         const isWatched = movies.watched.some(m => m.id === movie.id);
 

@@ -41,11 +41,15 @@
                 <h2>Browse Movies</h2>
 
                 <div class="browse-filters">
-                    <button class="filter-btn active" data-filter="popular">Popular</button>
+                    <button class="filter-btn active" data-filter="popular">Popular Now</button>
                     <button class="filter-btn" data-filter="top_rated">Top Rated</button>
                     <button class="filter-btn" data-filter="trending">Trending</button>
+                    <button class="filter-btn" data-filter="by_year">By Year</button>
                     <select id="genre-filter" class="genre-filter">
                         <option value="">All Genres</option>
+                    </select>
+                    <select id="year-filter" class="genre-filter" style="display: none;">
+                        <option value="">Select Year</option>
                     </select>
                 </div>
 
