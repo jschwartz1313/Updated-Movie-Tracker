@@ -38,7 +38,10 @@ function initializeEventListeners() {
     // Search
     document.getElementById('search-btn').addEventListener('click', searchMovies);
     document.getElementById('search-input').addEventListener('keypress', (e) => {
-        if (e.key === 'Enter') searchMovies();
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            searchMovies();
+        }
     });
 
     // Sort
@@ -115,17 +118,14 @@ function refreshCurrentView() {
 
     const currentView = activeNav.dataset.view;
     switch(currentView) {
-        case 'search':
-            // Re-render search results if they exist
-            const searchResults = document.getElementById('search-results');
-            if (searchResults.querySelector('.movie-grid')) {
-                // Search results exist, but we don't need to re-fetch
-                // The buttons will update on next search
-            }
-            break;
         case 'browse':
-            // Re-render browse results
-            loadBrowseMovies();
+            // Check if we have search results or browse results
+            const browseResults = document.getElementById('browse-results');
+            if (browseResults.querySelector('.movie-grid')) {
+                // Results exist - check if it's a search or browse view
+                // For now, we'll just update button states by re-rendering
+                // This will be handled naturally by the next search/browse
+            }
             break;
         case 'watchlist':
             renderWatchlist();
@@ -143,8 +143,8 @@ function refreshCurrentView() {
 
 async function searchMovies() {
     const query = document.getElementById('search-input').value.trim();
-    const mediaType = document.getElementById('search-media-type').value;
-    const resultsContainer = document.getElementById('search-results');
+    const mediaType = document.getElementById('media-type-filter').value;
+    const resultsContainer = document.getElementById('browse-results');
     const mediaLabel = mediaType === 'tv' ? 'TV shows' : 'movies';
 
     if (!query) {
@@ -175,7 +175,7 @@ async function searchMovies() {
         const data = await response.json();
 
         if (data.results && data.results.length > 0) {
-            renderSearchResults(data.results, mediaType);
+            renderSearchResults(data.results, mediaType, query);
         } else {
             resultsContainer.innerHTML = `
                 <div class="empty-state">
@@ -196,9 +196,15 @@ async function searchMovies() {
     }
 }
 
-function renderSearchResults(results, mediaType = 'movie') {
-    const container = document.getElementById('search-results');
-    container.innerHTML = '<div class="movie-grid"></div>';
+function renderSearchResults(results, mediaType = 'movie', query = '') {
+    const container = document.getElementById('browse-results');
+    const mediaLabel = mediaType === 'tv' ? 'TV shows' : 'movies';
+
+    let headerHTML = `<div style="margin-bottom: 20px; color: var(--text-secondary);">
+        Search results for "${query}" - ${results.length} ${mediaLabel} found
+    </div>`;
+
+    container.innerHTML = headerHTML + '<div class="movie-grid"></div>';
     const grid = container.querySelector('.movie-grid');
 
     results.slice(0, 20).forEach(item => {
@@ -1024,7 +1030,11 @@ function displayMovieModal(movie, listType) {
         ` : ''}
     `;
 
-    document.getElementById('movie-modal').classList.add('active');
+    const modal = document.getElementById('movie-modal');
+    modal.classList.add('active');
+
+    // Prevent body scroll when modal is open
+    document.body.style.overflow = 'hidden';
 }
 
 function openRatingModal(movieId, mediaType = 'movie') {
@@ -1033,6 +1043,10 @@ function openRatingModal(movieId, mediaType = 'movie') {
 
 function closeModal() {
     document.getElementById('movie-modal').classList.remove('active');
+
+    // Restore body scroll
+    document.body.style.overflow = '';
+
     // Refresh the current view to show updated ratings
     const activeView = document.querySelector('.nav-btn.active').dataset.view;
     if (activeView === 'watched') renderWatched();

@@ -12,8 +12,7 @@
         <header class="header">
             <h1>🎬 Movie Tracker</h1>
             <nav class="nav">
-                <button class="nav-btn active" data-view="search">Search</button>
-                <button class="nav-btn" data-view="browse">Browse</button>
+                <button class="nav-btn active" data-view="browse">Browse</button>
                 <button class="nav-btn" data-view="watchlist">Watchlist <span class="badge" id="watchlist-count">0</span></button>
                 <button class="nav-btn" data-view="watched">Watched <span class="badge" id="watched-count">0</span></button>
                 <button class="nav-btn" data-view="stats">Stats</button>
@@ -23,28 +22,16 @@
             </button>
         </header>
 
-        <!-- Search View -->
-        <section class="view active" id="search-view">
-            <div class="search-container">
-                <h2>Search Movies & TV Shows</h2>
-                <div style="display: flex; gap: 10px; margin-bottom: 15px; align-items: center;">
-                    <select id="search-media-type" class="genre-filter">
-                        <option value="movie">Movies</option>
-                        <option value="tv">TV Shows</option>
-                    </select>
-                </div>
-                <div class="search-box">
+        <!-- Browse View -->
+        <section class="view active" id="browse-view">
+            <div class="browse-container">
+                <h2>Browse & Search</h2>
+
+                <!-- Search Box -->
+                <div class="search-box" style="margin-bottom: 20px;">
                     <input type="text" id="search-input" placeholder="Search for a movie or TV show..." />
                     <button id="search-btn">Search</button>
                 </div>
-                <div class="search-results" id="search-results"></div>
-            </div>
-        </section>
-
-        <!-- Browse View -->
-        <section class="view" id="browse-view">
-            <div class="browse-container">
-                <h2>Browse Movies</h2>
 
                 <div class="browse-filters">
                     <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 10px;">
