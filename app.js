@@ -13,6 +13,15 @@ let movies = {
 const MEDIA_TYPE_MOVIE = 'movie';
 const MEDIA_TYPE_TV = 'tv';
 
+// Track current browse/search state for re-rendering
+let currentBrowseState = {
+    mode: 'browse', // 'browse' or 'search'
+    results: [],
+    mediaType: 'movie',
+    query: '',
+    year: null
+};
+
 // Initialize App
 document.addEventListener('DOMContentLoaded', () => {
     loadMoviesFromStorage();
@@ -122,12 +131,14 @@ function refreshCurrentView() {
     const currentView = activeNav.dataset.view;
     switch(currentView) {
         case 'browse':
-            // Check if we have search results or browse results
-            const browseResults = document.getElementById('browse-results');
-            if (browseResults.querySelector('.movie-grid')) {
-                // Results exist - check if it's a search or browse view
-                // For now, we'll just update button states by re-rendering
-                // This will be handled naturally by the next search/browse
+            // Re-render from stored state (no API call needed)
+            if (currentBrowseState.results.length > 0) {
+                renderBrowseGrid(
+                    currentBrowseState.results,
+                    currentBrowseState.mediaType,
+                    currentBrowseState.query,
+                    currentBrowseState.year
+                );
             }
             break;
         case 'watchlist':
@@ -200,17 +211,39 @@ async function searchMovies() {
 }
 
 function renderSearchResults(results, mediaType = 'movie', query = '') {
+    // Store current state for re-rendering
+    currentBrowseState = {
+        mode: 'search',
+        results: results,
+        mediaType: mediaType,
+        query: query,
+        year: null
+    };
+
+    renderBrowseGrid(results, mediaType, query, null);
+}
+
+function renderBrowseGrid(results, mediaType, query = null, year = null) {
     const container = document.getElementById('browse-results');
     const mediaLabel = mediaType === 'tv' ? 'TV shows' : 'movies';
 
-    let headerHTML = `<div style="margin-bottom: 20px; color: var(--text-secondary);">
-        Search results for "${query}" - ${results.length} ${mediaLabel} found
-    </div>`;
+    let headerHTML = '';
+    if (query) {
+        headerHTML = `<div style="margin-bottom: 20px; color: var(--text-secondary);">
+            Search results for "${query}" - ${results.length} ${mediaLabel} found
+        </div>`;
+    } else if (year) {
+        headerHTML = `<div style="margin-bottom: 20px; color: var(--text-secondary);">
+            Showing top ${results.length} ${mediaLabel} from ${year}
+        </div>`;
+    }
 
     container.innerHTML = headerHTML + '<div class="movie-grid"></div>';
     const grid = container.querySelector('.movie-grid');
 
-    results.slice(0, 20).forEach(item => {
+    const displayResults = (year || query) ? results : results.slice(0, 20);
+
+    displayResults.forEach(item => {
         const title = item.title || item.name;
         const releaseDate = item.release_date || item.first_air_date;
         const isInWatchlist = movies.watchlist.some(m => m.id === item.id && m.mediaType === mediaType);
@@ -227,6 +260,7 @@ function renderSearchResults(results, mediaType = 'movie', query = '') {
             <div class="movie-info">
                 <div class="movie-title">${title}</div>
                 <div class="movie-year">${releaseDate ? releaseDate.split('-')[0] : 'N/A'}</div>
+                ${item.vote_average ? `<div style="margin: 5px 0; font-size: 13px; color: var(--text-secondary);">⭐ ${item.vote_average.toFixed(1)}/10</div>` : ''}
                 <div class="movie-actions">
                     ${!isInWatchlist && !isWatched ?
                         `<button class="btn btn-primary btn-small" onclick="addToWatchlist(${item.id}, '${mediaType}')">+ Watchlist</button>` :
@@ -481,58 +515,16 @@ async function loadBrowseMovies(filter) {
 }
 
 function renderBrowseResults(results, year = null, mediaType = 'movie') {
-    const container = document.getElementById('browse-results');
-    const mediaLabel = mediaType === 'tv' ? 'TV shows' : 'movies';
+    // Store current state for re-rendering
+    currentBrowseState = {
+        mode: 'browse',
+        results: results,
+        mediaType: mediaType,
+        query: null,
+        year: year
+    };
 
-    // Add header showing count and year if applicable
-    let headerHTML = '';
-    if (year) {
-        headerHTML = `<div style="margin-bottom: 20px; color: var(--text-secondary);">
-            Showing top ${results.length} ${mediaLabel} from ${year}
-        </div>`;
-    }
-
-    container.innerHTML = headerHTML + '<div class="movie-grid"></div>';
-    const grid = container.querySelector('.movie-grid');
-
-    // Show all results for by_year (up to 100), otherwise limit to 20
-    const displayResults = year ? results : results.slice(0, 20);
-
-    displayResults.forEach(item => {
-        // Handle both movies and TV shows (different field names)
-        const title = item.title || item.name;
-        const releaseDate = item.release_date || item.first_air_date;
-        const isInWatchlist = movies.watchlist.some(m => m.id === item.id && m.mediaType === mediaType);
-        const isWatched = movies.watched.some(m => m.id === item.id && m.mediaType === mediaType);
-
-        const card = document.createElement('div');
-        card.className = 'movie-card';
-        card.innerHTML = `
-            <img
-                src="${item.poster_path ? TMDB_IMAGE_BASE + item.poster_path : 'https://via.placeholder.com/500x750?text=No+Poster'}"
-                alt="${title}"
-                class="movie-poster"
-            />
-            <div class="movie-info">
-                <div class="movie-title">${title}</div>
-                <div class="movie-year">${releaseDate ? releaseDate.split('-')[0] : 'N/A'}</div>
-                <div style="margin: 5px 0; font-size: 13px; color: var(--text-secondary);">
-                    ⭐ ${item.vote_average ? item.vote_average.toFixed(1) : 'N/A'}/10
-                </div>
-                <div class="movie-actions">
-                    ${!isInWatchlist && !isWatched ?
-                        `<button class="btn btn-primary btn-small" onclick="addToWatchlist(${item.id}, '${mediaType}')">+ Watchlist</button>` :
-                        ''}
-                    ${!isWatched ?
-                        `<button class="btn btn-secondary btn-small" onclick="addToWatched(${item.id}, '${mediaType}')">✓ Watched</button>` :
-                        '<span style="color: var(--success); font-size: 12px;">✓ In Collection</span>'}
-                </div>
-            </div>
-        `;
-
-        card.querySelector('.movie-poster').addEventListener('click', () => showMediaDetail(item.id, null, mediaType));
-        grid.appendChild(card);
-    });
+    renderBrowseGrid(results, mediaType, null, year);
 }
 
 // ============= Movie Management =============
