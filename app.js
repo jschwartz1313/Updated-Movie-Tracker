@@ -133,12 +133,23 @@ function refreshCurrentView() {
         case 'browse':
             // Re-render from stored state (no API call needed)
             if (currentBrowseState.results.length > 0) {
-                renderBrowseGrid(
-                    currentBrowseState.results,
-                    currentBrowseState.mediaType,
-                    currentBrowseState.query,
-                    currentBrowseState.year
-                );
+                if (currentBrowseState.mode === 'search') {
+                    renderSearchGrid(
+                        currentBrowseState.results,
+                        currentBrowseState.query,
+                        currentBrowseState.collections || []
+                    );
+                } else if (currentBrowseState.mode === 'collection') {
+                    // Re-load collection to refresh button states
+                    loadCollection(currentBrowseState.collectionId);
+                } else {
+                    renderBrowseGrid(
+                        currentBrowseState.results,
+                        currentBrowseState.mediaType,
+                        currentBrowseState.query,
+                        currentBrowseState.year
+                    );
+                }
             }
             break;
         case 'watchlist':
@@ -157,12 +168,11 @@ function refreshCurrentView() {
 
 async function searchMovies() {
     const query = document.getElementById('search-input').value.trim();
-    const mediaType = document.getElementById('media-type-filter').value;
+    const mediaTypeFilter = document.getElementById('media-type-filter').value;
     const resultsContainer = document.getElementById('browse-results');
-    const mediaLabel = mediaType === 'tv' ? 'TV shows' : 'movies';
 
     if (!query) {
-        showToast(`Please enter a ${mediaType === 'tv' ? 'TV show' : 'movie'} title`);
+        showToast('Please enter a search term');
         return;
     }
 
@@ -171,7 +181,7 @@ async function searchMovies() {
             <div class="empty-state">
                 <div class="empty-state-icon">🔑</div>
                 <div class="empty-state-text">
-                    Please add your TMDB API key to search for ${mediaLabel}.<br><br>
+                    Please add your TMDB API key to search.<br><br>
                     Get a free API key at: <a href="https://www.themoviedb.org/settings/api" target="_blank">themoviedb.org</a><br>
                     Then add it to the TMDB_API_KEY variable in app.js
                 </div>
@@ -180,21 +190,41 @@ async function searchMovies() {
         return;
     }
 
-    resultsContainer.innerHTML = `<div class="loading"><div class="spinner"></div>Searching ${mediaLabel}...</div>`;
+    resultsContainer.innerHTML = `<div class="loading"><div class="spinner"></div>Searching...</div>`;
 
     try {
-        const response = await fetch(
-            `${TMDB_BASE_URL}/search/${mediaType}?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(query)}&page=1`
-        );
-        const data = await response.json();
+        // Use multi-search to get movies, TV shows, and collections
+        const [multiResponse, collectionResponse] = await Promise.all([
+            fetch(`${TMDB_BASE_URL}/search/multi?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(query)}&page=1`),
+            fetch(`${TMDB_BASE_URL}/search/collection?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(query)}&page=1`)
+        ]);
 
-        if (data.results && data.results.length > 0) {
-            renderSearchResults(data.results, mediaType, query);
+        const multiData = await multiResponse.json();
+        const collectionData = await collectionResponse.json();
+
+        // Filter results based on media type selection
+        let results = (multiData.results || []).filter(item => {
+            if (item.media_type === 'person') return false; // Skip people
+            if (mediaTypeFilter === 'movie') return item.media_type === 'movie';
+            if (mediaTypeFilter === 'tv') return item.media_type === 'tv';
+            return true;
+        });
+
+        // Add media_type to each result if not present
+        results = results.map(item => ({
+            ...item,
+            mediaType: item.media_type || 'movie'
+        }));
+
+        const collections = collectionData.results || [];
+
+        if (results.length > 0 || collections.length > 0) {
+            renderSearchResults(results, mediaTypeFilter, query, collections);
         } else {
             resultsContainer.innerHTML = `
                 <div class="empty-state">
                     <div class="empty-state-icon">🔍</div>
-                    <div class="empty-state-text">No ${mediaLabel} found for "${query}"</div>
+                    <div class="empty-state-text">No results found for "${query}"</div>
                 </div>
             `;
         }
@@ -203,24 +233,111 @@ async function searchMovies() {
         resultsContainer.innerHTML = `
             <div class="empty-state">
                 <div class="empty-state-icon">❌</div>
-                <div class="empty-state-text">Error searching ${mediaLabel}. Please try again.</div>
+                <div class="empty-state-text">Error searching. Please try again.</div>
             </div>
         `;
-        showToast(`Error searching ${mediaLabel}`);
+        showToast('Error searching');
     }
 }
 
-function renderSearchResults(results, mediaType = 'movie', query = '') {
+function renderSearchResults(results, mediaType = 'movie', query = '', collections = []) {
     // Store current state for re-rendering
     currentBrowseState = {
         mode: 'search',
         results: results,
         mediaType: mediaType,
         query: query,
-        year: null
+        year: null,
+        collections: collections
     };
 
-    renderBrowseGrid(results, mediaType, query, null);
+    renderSearchGrid(results, query, collections);
+}
+
+function renderSearchGrid(results, query, collections = []) {
+    const container = document.getElementById('browse-results');
+
+    let html = `<div style="margin-bottom: 20px; color: var(--text-secondary);">
+        Search results for "${query}" - ${results.length} items found
+    </div>`;
+
+    // Show collections if any
+    if (collections.length > 0) {
+        html += `
+            <div class="collections-section" style="margin-bottom: 30px;">
+                <h3 style="margin-bottom: 15px; color: var(--text-primary);">Collections & Franchises</h3>
+                <div class="collections-grid" style="display: flex; gap: 15px; flex-wrap: wrap;">
+                    ${collections.slice(0, 5).map(collection => `
+                        <div class="collection-card" onclick="loadCollection(${collection.id})" style="
+                            cursor: pointer;
+                            background: var(--bg-card);
+                            border: 1px solid var(--border);
+                            border-radius: 12px;
+                            padding: 15px;
+                            display: flex;
+                            align-items: center;
+                            gap: 12px;
+                            transition: all 0.2s;
+                            min-width: 250px;
+                        ">
+                            ${collection.poster_path ?
+                                `<img src="${TMDB_IMAGE_BASE.replace('w500', 'w92')}${collection.poster_path}"
+                                    alt="${collection.name}"
+                                    style="width: 50px; height: 75px; object-fit: cover; border-radius: 6px;">` :
+                                `<div style="width: 50px; height: 75px; background: var(--bg-secondary); border-radius: 6px; display: flex; align-items: center; justify-content: center;">🎬</div>`
+                            }
+                            <div>
+                                <div style="font-weight: 600; color: var(--text-primary);">${collection.name}</div>
+                                <div style="font-size: 12px; color: var(--accent);">View all movies →</div>
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>
+        `;
+    }
+
+    html += '<div class="movie-grid"></div>';
+    container.innerHTML = html;
+
+    const grid = container.querySelector('.movie-grid');
+
+    results.slice(0, 40).forEach(item => {
+        const mediaType = item.media_type || item.mediaType || 'movie';
+        const title = item.title || item.name;
+        const releaseDate = item.release_date || item.first_air_date;
+        const isInWatchlist = movies.watchlist.some(m => m.id === item.id && m.mediaType === mediaType);
+        const isWatched = movies.watched.some(m => m.id === item.id && m.mediaType === mediaType);
+
+        const card = document.createElement('div');
+        card.className = 'movie-card';
+        card.innerHTML = `
+            <img
+                src="${item.poster_path ? TMDB_IMAGE_BASE + item.poster_path : 'https://via.placeholder.com/500x750?text=No+Poster'}"
+                alt="${title}"
+                class="movie-poster"
+            />
+            <div class="movie-info">
+                <div class="movie-title">${title}</div>
+                <div class="movie-year">${releaseDate ? releaseDate.split('-')[0] : 'N/A'} ${mediaType === 'tv' ? '• TV' : ''}</div>
+                ${item.vote_average ? `<div style="margin: 5px 0; font-size: 13px; color: var(--text-secondary);">⭐ ${item.vote_average.toFixed(1)}/10</div>` : ''}
+                <div class="movie-actions">
+                    ${!isInWatchlist && !isWatched ?
+                        `<button class="btn btn-primary btn-small" onclick="addToWatchlist(${item.id}, '${mediaType}')">+ Watchlist</button>` :
+                        ''}
+                    ${!isWatched ?
+                        `<button class="btn btn-secondary btn-small" onclick="addToWatched(${item.id}, '${mediaType}')">✓ Watched</button>` :
+                        '<span style="color: var(--success); font-size: 12px;">✓ In Collection</span>'}
+                </div>
+                <button class="btn btn-small streaming-btn" onclick="event.stopPropagation(); showStreamingInfo(${item.id}, '${mediaType}')" style="margin-top: 8px; width: 100%; background: var(--bg-secondary); border: 1px solid var(--border);">
+                    📺 Where to Watch
+                </button>
+            </div>
+        `;
+
+        card.querySelector('.movie-poster').addEventListener('click', () => showMediaDetail(item.id, null, mediaType));
+        grid.appendChild(card);
+    });
 }
 
 function renderBrowseGrid(results, mediaType, query = null, year = null) {
@@ -269,12 +386,243 @@ function renderBrowseGrid(results, mediaType, query = null, year = null) {
                         `<button class="btn btn-secondary btn-small" onclick="addToWatched(${item.id}, '${mediaType}')">✓ Watched</button>` :
                         '<span style="color: var(--success); font-size: 12px;">✓ In Collection</span>'}
                 </div>
+                <button class="btn btn-small streaming-btn" onclick="event.stopPropagation(); showStreamingInfo(${item.id}, '${mediaType}')" style="margin-top: 8px; width: 100%; background: var(--bg-secondary); border: 1px solid var(--border);">
+                    📺 Where to Watch
+                </button>
             </div>
         `;
 
         card.querySelector('.movie-poster').addEventListener('click', () => showMediaDetail(item.id, null, mediaType));
         grid.appendChild(card);
     });
+}
+
+// Show streaming info in a popup
+async function showStreamingInfo(mediaId, mediaType) {
+    showToast('Loading streaming info...');
+
+    try {
+        const response = await fetch(
+            `${TMDB_BASE_URL}/${mediaType}/${mediaId}/watch/providers?api_key=${TMDB_API_KEY}`
+        );
+        const data = await response.json();
+        const usProviders = data.results?.US;
+
+        if (!usProviders) {
+            showToast('No streaming info available for US');
+            return;
+        }
+
+        const providers = [];
+        if (usProviders.flatrate) providers.push(...usProviders.flatrate.map(p => ({ ...p, type: 'Stream' })));
+        if (usProviders.rent) providers.push(...usProviders.rent.map(p => ({ ...p, type: 'Rent' })));
+        if (usProviders.buy) providers.push(...usProviders.buy.map(p => ({ ...p, type: 'Buy' })));
+
+        // Remove duplicates
+        const uniqueProviders = [...new Map(providers.map(p => [p.provider_id, p])).values()];
+
+        if (uniqueProviders.length === 0) {
+            showToast('No streaming options available');
+            return;
+        }
+
+        // Show in a modal-like overlay
+        showStreamingModal(uniqueProviders, usProviders.link);
+    } catch (error) {
+        console.error('Error fetching streaming info:', error);
+        showToast('Error loading streaming info');
+    }
+}
+
+function showStreamingModal(providers, justWatchLink) {
+    // Create overlay
+    const overlay = document.createElement('div');
+    overlay.className = 'streaming-overlay';
+    overlay.style.cssText = `
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0,0,0,0.8);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 1001;
+    `;
+
+    const streamProviders = providers.filter(p => p.type === 'Stream');
+    const rentProviders = providers.filter(p => p.type === 'Rent');
+    const buyProviders = providers.filter(p => p.type === 'Buy');
+
+    overlay.innerHTML = `
+        <div style="
+            background: var(--bg-card);
+            border-radius: 16px;
+            padding: 25px;
+            max-width: 500px;
+            width: 90%;
+            max-height: 80vh;
+            overflow-y: auto;
+        ">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                <h3 style="color: var(--text-primary); margin: 0;">Where to Watch (US)</h3>
+                <button onclick="this.closest('.streaming-overlay').remove()" style="
+                    background: none;
+                    border: none;
+                    font-size: 24px;
+                    cursor: pointer;
+                    color: var(--text-secondary);
+                ">&times;</button>
+            </div>
+
+            ${streamProviders.length > 0 ? `
+                <div style="margin-bottom: 20px;">
+                    <h4 style="color: var(--text-secondary); font-size: 14px; margin-bottom: 10px;">Stream</h4>
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                        ${streamProviders.map(p => `
+                            <div style="text-align: center;">
+                                <img src="${TMDB_IMAGE_BASE.replace('w500', 'w92')}${p.logo_path}"
+                                    alt="${p.provider_name}"
+                                    title="${p.provider_name}"
+                                    style="width: 50px; height: 50px; border-radius: 10px; border: 2px solid var(--border);">
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px; max-width: 60px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${p.provider_name}</div>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            ` : ''}
+
+            ${rentProviders.length > 0 ? `
+                <div style="margin-bottom: 20px;">
+                    <h4 style="color: var(--text-secondary); font-size: 14px; margin-bottom: 10px;">Rent</h4>
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                        ${rentProviders.slice(0, 6).map(p => `
+                            <div style="text-align: center;">
+                                <img src="${TMDB_IMAGE_BASE.replace('w500', 'w92')}${p.logo_path}"
+                                    alt="${p.provider_name}"
+                                    title="${p.provider_name}"
+                                    style="width: 50px; height: 50px; border-radius: 10px; border: 2px solid var(--border);">
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px; max-width: 60px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${p.provider_name}</div>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            ` : ''}
+
+            ${buyProviders.length > 0 ? `
+                <div style="margin-bottom: 20px;">
+                    <h4 style="color: var(--text-secondary); font-size: 14px; margin-bottom: 10px;">Buy</h4>
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                        ${buyProviders.slice(0, 6).map(p => `
+                            <div style="text-align: center;">
+                                <img src="${TMDB_IMAGE_BASE.replace('w500', 'w92')}${p.logo_path}"
+                                    alt="${p.provider_name}"
+                                    title="${p.provider_name}"
+                                    style="width: 50px; height: 50px; border-radius: 10px; border: 2px solid var(--border);">
+                                <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px; max-width: 60px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${p.provider_name}</div>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            ` : ''}
+
+            ${justWatchLink ? `
+                <a href="${justWatchLink}" target="_blank" class="btn btn-primary" style="width: 100%; text-align: center; display: block; text-decoration: none;">
+                    View on JustWatch →
+                </a>
+            ` : ''}
+
+            <p style="font-size: 11px; color: var(--text-secondary); margin-top: 15px; text-align: center;">
+                Streaming data provided by JustWatch
+            </p>
+        </div>
+    `;
+
+    overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) overlay.remove();
+    });
+
+    document.body.appendChild(overlay);
+}
+
+async function loadCollection(collectionId) {
+    const resultsContainer = document.getElementById('browse-results');
+    resultsContainer.innerHTML = `<div class="loading"><div class="spinner"></div>Loading collection...</div>`;
+
+    try {
+        const response = await fetch(
+            `${TMDB_BASE_URL}/collection/${collectionId}?api_key=${TMDB_API_KEY}`
+        );
+        const collection = await response.json();
+
+        if (collection.parts && collection.parts.length > 0) {
+            // Sort by release date
+            const sortedParts = collection.parts.sort((a, b) =>
+                (a.release_date || '').localeCompare(b.release_date || '')
+            );
+
+            // Store state for re-rendering
+            currentBrowseState = {
+                mode: 'collection',
+                results: sortedParts,
+                mediaType: 'movie',
+                query: collection.name,
+                year: null,
+                collections: [],
+                collectionId: collectionId
+            };
+
+            // Render with collection header
+            let html = `
+                <div style="margin-bottom: 20px;">
+                    <button class="btn btn-secondary btn-small" onclick="searchMovies()" style="margin-bottom: 15px;">← Back to search</button>
+                    <h3 style="color: var(--text-primary);">${collection.name}</h3>
+                    <p style="color: var(--text-secondary);">${collection.parts.length} movies in this collection</p>
+                </div>
+            `;
+            html += '<div class="movie-grid"></div>';
+            resultsContainer.innerHTML = html;
+
+            const grid = resultsContainer.querySelector('.movie-grid');
+            sortedParts.forEach(item => {
+                const isInWatchlist = movies.watchlist.some(m => m.id === item.id && m.mediaType === 'movie');
+                const isWatched = movies.watched.some(m => m.id === item.id && m.mediaType === 'movie');
+
+                const card = document.createElement('div');
+                card.className = 'movie-card';
+                card.innerHTML = `
+                    <img
+                        src="${item.poster_path ? TMDB_IMAGE_BASE + item.poster_path : 'https://via.placeholder.com/500x750?text=No+Poster'}"
+                        alt="${item.title}"
+                        class="movie-poster"
+                    />
+                    <div class="movie-info">
+                        <div class="movie-title">${item.title}</div>
+                        <div class="movie-year">${item.release_date ? item.release_date.split('-')[0] : 'N/A'}</div>
+                        ${item.vote_average ? `<div style="margin: 5px 0; font-size: 13px; color: var(--text-secondary);">⭐ ${item.vote_average.toFixed(1)}/10</div>` : ''}
+                        <div class="movie-actions">
+                            ${!isInWatchlist && !isWatched ?
+                                `<button class="btn btn-primary btn-small" onclick="addToWatchlist(${item.id}, 'movie')">+ Watchlist</button>` :
+                                ''}
+                            ${!isWatched ?
+                                `<button class="btn btn-secondary btn-small" onclick="addToWatched(${item.id}, 'movie')">✓ Watched</button>` :
+                                '<span style="color: var(--success); font-size: 12px;">✓ In Collection</span>'}
+                        </div>
+                        <button class="btn btn-small streaming-btn" onclick="event.stopPropagation(); showStreamingInfo(${item.id}, 'movie')" style="margin-top: 8px; width: 100%; background: var(--bg-secondary); border: 1px solid var(--border);">
+                            📺 Where to Watch
+                        </button>
+                    </div>
+                `;
+
+                card.querySelector('.movie-poster').addEventListener('click', () => showMediaDetail(item.id, null, 'movie'));
+                grid.appendChild(card);
+            });
+        }
+    } catch (error) {
+        console.error('Error loading collection:', error);
+        showToast('Error loading collection');
+    }
 }
 
 async function getMovieDetails(movieId) {
@@ -730,6 +1078,10 @@ function renderWatchlist() {
                 return a.title.localeCompare(b.title);
             case 'year':
                 return (b.release_date || '').localeCompare(a.release_date || '');
+            case 'director':
+                const directorA = getDirector(a);
+                const directorB = getDirector(b);
+                return directorA.localeCompare(directorB);
             case 'added':
             default:
                 return new Date(b.addedDate) - new Date(a.addedDate);
@@ -741,6 +1093,13 @@ function renderWatchlist() {
         const card = createMovieCard(movie, 'watchlist');
         container.appendChild(card);
     });
+}
+
+// Helper function to get director name from crew
+function getDirector(movie) {
+    if (!movie.crew || movie.crew.length === 0) return 'Unknown';
+    const director = movie.crew.find(c => c.job === 'Director');
+    return director ? director.name : 'Unknown';
 }
 
 function clearWatchlist() {
@@ -781,6 +1140,10 @@ function renderWatched() {
                 return a.title.localeCompare(b.title);
             case 'year':
                 return (b.release_date || '').localeCompare(a.release_date || '');
+            case 'director':
+                const directorA = getDirector(a);
+                const directorB = getDirector(b);
+                return directorA.localeCompare(directorB);
             case 'date':
             default:
                 return new Date(b.watchedDate) - new Date(a.watchedDate);
