@@ -464,17 +464,16 @@ function showStreamingModal(providers, justWatchLink) {
     const rentProviders = providers.filter(p => p.type === 'Rent');
     const buyProviders = providers.filter(p => p.type === 'Buy');
 
-    // Helper to create clickable provider item
+    // Helper to create provider item (non-clickable, just displays the provider)
     const createProviderItem = (p) => {
-        const link = justWatchLink || '#';
         return `
-            <a href="${link}" target="_blank" style="text-align: center; text-decoration: none; cursor: pointer; transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.1)'" onmouseout="this.style.transform='scale(1)'">
+            <div style="text-align: center;">
                 <img src="${TMDB_IMAGE_BASE.replace('w500', 'w92')}${p.logo_path}"
                     alt="${p.provider_name}"
-                    title="Watch on ${p.provider_name} (opens JustWatch)"
+                    title="${p.provider_name}"
                     style="width: 50px; height: 50px; border-radius: 10px; border: 2px solid var(--border);">
                 <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px; max-width: 60px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${p.provider_name}</div>
-            </a>
+            </div>
         `;
     };
 
@@ -528,13 +527,12 @@ function showStreamingModal(providers, justWatchLink) {
 
             ${justWatchLink ? `
                 <a href="${justWatchLink}" target="_blank" class="btn btn-primary" style="width: 100%; text-align: center; display: block; text-decoration: none;">
-                    View on JustWatch →
+                    🔗 Open on JustWatch to Watch
                 </a>
+                <p style="font-size: 11px; color: var(--text-secondary); margin-top: 10px; text-align: center;">
+                    JustWatch will link you directly to the streaming service
+                </p>
             ` : ''}
-
-            <p style="font-size: 11px; color: var(--text-secondary); margin-top: 15px; text-align: center;">
-                Click any provider to view on JustWatch
-            </p>
         </div>
     `;
 
