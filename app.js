@@ -373,8 +373,8 @@ function renderSearchGrid(results, query, collections = []) {
         const mediaType = item.media_type || item.mediaType || 'movie';
         const title = item.title || item.name;
         const releaseDate = item.release_date || item.first_air_date;
-        const isInWatchlist = movies.watchlist.some(m => m.id === item.id && m.mediaType === mediaType);
-        const isWatched = movies.watched.some(m => m.id === item.id && m.mediaType === mediaType);
+        const isInWatchlist = movies.watchlist.some(m => m.id === item.id && (m.mediaType || 'movie') === mediaType);
+        const isWatched = movies.watched.some(m => m.id === item.id && (m.mediaType || 'movie') === mediaType);
 
         const card = document.createElement('div');
         card.className = 'movie-card';
@@ -430,8 +430,8 @@ function renderBrowseGrid(results, mediaType, query = null, year = null) {
     displayResults.forEach(item => {
         const title = item.title || item.name;
         const releaseDate = item.release_date || item.first_air_date;
-        const isInWatchlist = movies.watchlist.some(m => m.id === item.id && m.mediaType === mediaType);
-        const isWatched = movies.watched.some(m => m.id === item.id && m.mediaType === mediaType);
+        const isInWatchlist = movies.watchlist.some(m => m.id === item.id && (m.mediaType || 'movie') === mediaType);
+        const isWatched = movies.watched.some(m => m.id === item.id && (m.mediaType || 'movie') === mediaType);
 
         const card = document.createElement('div');
         card.className = 'movie-card';
@@ -641,8 +641,8 @@ async function loadCollection(collectionId) {
 
             const grid = resultsContainer.querySelector('.movie-grid');
             sortedParts.forEach(item => {
-                const isInWatchlist = movies.watchlist.some(m => m.id === item.id && m.mediaType === 'movie');
-                const isWatched = movies.watched.some(m => m.id === item.id && m.mediaType === 'movie');
+                const isInWatchlist = movies.watchlist.some(m => m.id === item.id && (m.mediaType || 'movie') === 'movie');
+                const isWatched = movies.watched.some(m => m.id === item.id && (m.mediaType || 'movie') === 'movie');
 
                 const card = document.createElement('div');
                 card.className = 'movie-card';
@@ -933,7 +933,7 @@ function renderBrowseResults(results, year = null, mediaType = 'movie') {
 // ============= Movie Management =============
 
 async function addToWatchlist(mediaId, mediaType = 'movie') {
-    if (movies.watchlist.some(m => m.id === mediaId && m.mediaType === mediaType)) {
+    if (movies.watchlist.some(m => m.id === mediaId && (m.mediaType || 'movie') === mediaType)) {
         showToast('Already in watchlist');
         return;
     }
@@ -977,9 +977,9 @@ async function addToWatchlist(mediaId, mediaType = 'movie') {
 
 async function addToWatched(mediaId, mediaType = 'movie') {
     // Remove from watchlist if present
-    movies.watchlist = movies.watchlist.filter(m => !(m.id === mediaId && m.mediaType === mediaType));
+    movies.watchlist = movies.watchlist.filter(m => !(m.id === mediaId && (m.mediaType || 'movie') === mediaType));
 
-    if (movies.watched.some(m => m.id === mediaId && m.mediaType === mediaType)) {
+    if (movies.watched.some(m => m.id === mediaId && (m.mediaType || 'movie') === mediaType)) {
         showToast('Already in watched list');
         return;
     }
@@ -1025,10 +1025,14 @@ async function addToWatched(mediaId, mediaType = 'movie') {
 }
 
 function moveToWatched(movieId, mediaType = 'movie') {
-    const movie = movies.watchlist.find(m => m.id === movieId && m.mediaType === mediaType);
-    if (!movie) return;
+    // Use fallback comparison to handle items without mediaType
+    const movie = movies.watchlist.find(m => m.id === movieId && (m.mediaType || 'movie') === mediaType);
+    if (!movie) {
+        console.log('Movie not found in watchlist:', movieId, mediaType);
+        return;
+    }
 
-    movies.watchlist = movies.watchlist.filter(m => !(m.id === movieId && m.mediaType === mediaType));
+    movies.watchlist = movies.watchlist.filter(m => !(m.id === movieId && (m.mediaType || 'movie') === mediaType));
     movie.watchedDate = new Date().toISOString();
     movie.rating = 0;
     movie.review = '';
@@ -1042,7 +1046,7 @@ function moveToWatched(movieId, mediaType = 'movie') {
 }
 
 function removeFromWatchlist(movieId, mediaType = 'movie') {
-    const movie = movies.watchlist.find(m => m.id === movieId && m.mediaType === mediaType);
+    const movie = movies.watchlist.find(m => m.id === movieId && (m.mediaType || 'movie') === mediaType);
     if (!movie) return;
 
     // Confirm before removing
@@ -1050,7 +1054,7 @@ function removeFromWatchlist(movieId, mediaType = 'movie') {
         return;
     }
 
-    movies.watchlist = movies.watchlist.filter(m => !(m.id === movieId && m.mediaType === mediaType));
+    movies.watchlist = movies.watchlist.filter(m => !(m.id === movieId && (m.mediaType || 'movie') === mediaType));
     saveMoviesToStorage();
     updateCounts();
     renderWatchlist();
@@ -1058,7 +1062,7 @@ function removeFromWatchlist(movieId, mediaType = 'movie') {
 }
 
 function removeFromWatched(movieId, mediaType = 'movie') {
-    const movie = movies.watched.find(m => m.id === movieId && m.mediaType === mediaType);
+    const movie = movies.watched.find(m => m.id === movieId && (m.mediaType || 'movie') === mediaType);
     if (!movie) return;
 
     // Confirm before removing
@@ -1066,7 +1070,7 @@ function removeFromWatched(movieId, mediaType = 'movie') {
         return;
     }
 
-    movies.watched = movies.watched.filter(m => !(m.id === movieId && m.mediaType === mediaType));
+    movies.watched = movies.watched.filter(m => !(m.id === movieId && (m.mediaType || 'movie') === mediaType));
     saveMoviesToStorage();
     updateCounts();
     updateStats();
@@ -1075,7 +1079,7 @@ function removeFromWatched(movieId, mediaType = 'movie') {
 }
 
 function rateMovie(movieId, rating, mediaType = 'movie') {
-    const movie = movies.watched.find(m => m.id === movieId && m.mediaType === mediaType);
+    const movie = movies.watched.find(m => m.id === movieId && (m.mediaType || 'movie') === mediaType);
     if (!movie) return;
 
     movie.rating = rating;
@@ -1389,9 +1393,9 @@ function showMediaDetail(mediaId, listType = null, mediaType = 'movie') {
     let item;
 
     if (listType === 'watchlist') {
-        item = movies.watchlist.find(m => m.id === mediaId && m.mediaType === mediaType);
+        item = movies.watchlist.find(m => m.id === mediaId && (m.mediaType || 'movie') === mediaType);
     } else if (listType === 'watched') {
-        item = movies.watched.find(m => m.id === mediaId && m.mediaType === mediaType);
+        item = movies.watched.find(m => m.id === mediaId && (m.mediaType || 'movie') === mediaType);
     }
 
     // If item not in lists, fetch from API
@@ -1670,6 +1674,19 @@ function loadMoviesFromStorage() {
     const stored = localStorage.getItem('movieTrackerData');
     if (stored) {
         movies = JSON.parse(stored);
+
+        // Normalize data: ensure all items have mediaType set (for backwards compatibility)
+        movies.watchlist = movies.watchlist.map(m => ({
+            ...m,
+            mediaType: m.mediaType || 'movie'
+        }));
+        movies.watched = movies.watched.map(m => ({
+            ...m,
+            mediaType: m.mediaType || 'movie'
+        }));
+
+        // Save the normalized data back
+        saveMoviesToStorage();
     }
 }
 
