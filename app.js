@@ -175,6 +175,42 @@ function refreshCurrentView() {
 
 // ============= TMDB API Integration =============
 
+// Franchise keyword mapping - search these additional terms for better collection results
+const FRANCHISE_KEYWORDS = {
+    'marvel': ['Avengers', 'Iron Man', 'Thor', 'Captain America', 'Spider-Man', 'Guardians of the Galaxy', 'Black Panther', 'Ant-Man', 'Doctor Strange', 'X-Men', 'Deadpool'],
+    'mcu': ['Avengers', 'Iron Man', 'Thor', 'Captain America', 'Spider-Man', 'Guardians of the Galaxy', 'Black Panther', 'Ant-Man', 'Doctor Strange'],
+    'star wars': ['Star Wars'],
+    'starwars': ['Star Wars'],
+    'dc': ['Batman', 'Superman', 'Wonder Woman', 'Justice League', 'Aquaman', 'The Flash', 'Suicide Squad'],
+    'dceu': ['Batman', 'Superman', 'Wonder Woman', 'Justice League', 'Aquaman'],
+    'pixar': ['Toy Story', 'Finding Nemo', 'The Incredibles', 'Cars', 'Monsters, Inc'],
+    'harry potter': ['Harry Potter', 'Fantastic Beasts'],
+    'lord of the rings': ['Lord of the Rings', 'The Hobbit'],
+    'lotr': ['Lord of the Rings', 'The Hobbit'],
+    'fast and furious': ['Fast & Furious', 'Fast and Furious'],
+    'jurassic': ['Jurassic Park', 'Jurassic World'],
+    'transformers': ['Transformers'],
+    'mission impossible': ['Mission: Impossible'],
+    'james bond': ['James Bond'],
+    'bond': ['James Bond'],
+    '007': ['James Bond'],
+    'john wick': ['John Wick'],
+    'matrix': ['The Matrix'],
+    'indiana jones': ['Indiana Jones'],
+    'pirates': ['Pirates of the Caribbean'],
+    'shrek': ['Shrek'],
+    'despicable me': ['Despicable Me', 'Minions'],
+    'minions': ['Despicable Me', 'Minions'],
+    'kung fu panda': ['Kung Fu Panda'],
+    'how to train your dragon': ['How to Train Your Dragon'],
+    'planet of the apes': ['Planet of the Apes'],
+    'alien': ['Alien'],
+    'predator': ['Predator'],
+    'terminator': ['Terminator'],
+    'rocky': ['Rocky', 'Creed'],
+    'creed': ['Rocky', 'Creed']
+};
+
 async function searchMovies() {
     const query = document.getElementById('search-input').value.trim();
     const mediaTypeFilter = document.getElementById('media-type-filter').value;
@@ -202,14 +238,38 @@ async function searchMovies() {
     resultsContainer.innerHTML = `<div class="loading"><div class="spinner"></div>Searching...</div>`;
 
     try {
-        // Use multi-search to get movies, TV shows, and collections
-        const [multiResponse, collectionResponse] = await Promise.all([
+        // Check if query matches a franchise keyword
+        const queryLower = query.toLowerCase();
+        const franchiseTerms = FRANCHISE_KEYWORDS[queryLower] || [];
+
+        // Build collection search promises - include original query + franchise terms
+        const collectionSearchTerms = [query, ...franchiseTerms];
+        const uniqueTerms = [...new Set(collectionSearchTerms)];
+
+        const collectionPromises = uniqueTerms.map(term =>
+            fetch(`${TMDB_BASE_URL}/search/collection?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(term)}&page=1`)
+                .then(r => r.json())
+        );
+
+        // Fetch multi-search and all collection searches in parallel
+        const [multiResponse, ...collectionResults] = await Promise.all([
             fetch(`${TMDB_BASE_URL}/search/multi?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(query)}&page=1`),
-            fetch(`${TMDB_BASE_URL}/search/collection?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(query)}&page=1`)
+            ...collectionPromises
         ]);
 
         const multiData = await multiResponse.json();
-        const collectionData = await collectionResponse.json();
+
+        // Merge all collection results and remove duplicates
+        const allCollections = [];
+        const seenCollectionIds = new Set();
+        collectionResults.forEach(data => {
+            (data.results || []).forEach(collection => {
+                if (!seenCollectionIds.has(collection.id)) {
+                    seenCollectionIds.add(collection.id);
+                    allCollections.push(collection);
+                }
+            });
+        });
 
         // Filter results based on media type selection
         let results = (multiData.results || []).filter(item => {
@@ -225,10 +285,8 @@ async function searchMovies() {
             mediaType: item.media_type || 'movie'
         }));
 
-        const collections = collectionData.results || [];
-
-        if (results.length > 0 || collections.length > 0) {
-            renderSearchResults(results, mediaTypeFilter, query, collections);
+        if (results.length > 0 || allCollections.length > 0) {
+            renderSearchResults(results, mediaTypeFilter, query, allCollections);
         } else {
             resultsContainer.innerHTML = `
                 <div class="empty-state">
@@ -276,7 +334,7 @@ function renderSearchGrid(results, query, collections = []) {
             <div class="collections-section" style="margin-bottom: 30px;">
                 <h3 style="margin-bottom: 15px; color: var(--text-primary);">Collections & Franchises</h3>
                 <div class="collections-grid" style="display: flex; gap: 15px; flex-wrap: wrap;">
-                    ${collections.slice(0, 5).map(collection => `
+                    ${collections.slice(0, 12).map(collection => `
                         <div class="collection-card" onclick="loadCollection(${collection.id})" style="
                             cursor: pointer;
                             background: var(--bg-card);
@@ -332,10 +390,10 @@ function renderSearchGrid(results, query, collections = []) {
                 ${item.vote_average ? `<div style="margin: 5px 0; font-size: 13px; color: var(--text-secondary);">⭐ ${item.vote_average.toFixed(1)}/10</div>` : ''}
                 <div class="movie-actions">
                     ${!isInWatchlist && !isWatched ?
-                        `<button class="btn btn-primary btn-small" onclick="addToWatchlist(${item.id}, '${mediaType}')">+ Watchlist</button>` :
+                        `<button class="btn btn-primary btn-small" onclick="event.stopPropagation(); addToWatchlist(${item.id}, '${mediaType}')">+ Watchlist</button>` :
                         ''}
                     ${!isWatched ?
-                        `<button class="btn btn-secondary btn-small" onclick="addToWatched(${item.id}, '${mediaType}')">✓ Watched</button>` :
+                        `<button class="btn btn-secondary btn-small" onclick="event.stopPropagation(); addToWatched(${item.id}, '${mediaType}')">✓ Watched</button>` :
                         '<span style="color: var(--success); font-size: 12px;">✓ In Collection</span>'}
                 </div>
                 <button class="btn btn-small streaming-btn" onclick="event.stopPropagation(); showStreamingInfo(${item.id}, '${mediaType}')" style="margin-top: 8px; width: 100%; background: var(--bg-secondary); border: 1px solid var(--border);">
@@ -389,10 +447,10 @@ function renderBrowseGrid(results, mediaType, query = null, year = null) {
                 ${item.vote_average ? `<div style="margin: 5px 0; font-size: 13px; color: var(--text-secondary);">⭐ ${item.vote_average.toFixed(1)}/10</div>` : ''}
                 <div class="movie-actions">
                     ${!isInWatchlist && !isWatched ?
-                        `<button class="btn btn-primary btn-small" onclick="addToWatchlist(${item.id}, '${mediaType}')">+ Watchlist</button>` :
+                        `<button class="btn btn-primary btn-small" onclick="event.stopPropagation(); addToWatchlist(${item.id}, '${mediaType}')">+ Watchlist</button>` :
                         ''}
                     ${!isWatched ?
-                        `<button class="btn btn-secondary btn-small" onclick="addToWatched(${item.id}, '${mediaType}')">✓ Watched</button>` :
+                        `<button class="btn btn-secondary btn-small" onclick="event.stopPropagation(); addToWatched(${item.id}, '${mediaType}')">✓ Watched</button>` :
                         '<span style="color: var(--success); font-size: 12px;">✓ In Collection</span>'}
                 </div>
                 <button class="btn btn-small streaming-btn" onclick="event.stopPropagation(); showStreamingInfo(${item.id}, '${mediaType}')" style="margin-top: 8px; width: 100%; background: var(--bg-secondary); border: 1px solid var(--border);">
@@ -600,10 +658,10 @@ async function loadCollection(collectionId) {
                         ${item.vote_average ? `<div style="margin: 5px 0; font-size: 13px; color: var(--text-secondary);">⭐ ${item.vote_average.toFixed(1)}/10</div>` : ''}
                         <div class="movie-actions">
                             ${!isInWatchlist && !isWatched ?
-                                `<button class="btn btn-primary btn-small" onclick="addToWatchlist(${item.id}, 'movie')">+ Watchlist</button>` :
+                                `<button class="btn btn-primary btn-small" onclick="event.stopPropagation(); addToWatchlist(${item.id}, 'movie')">+ Watchlist</button>` :
                                 ''}
                             ${!isWatched ?
-                                `<button class="btn btn-secondary btn-small" onclick="addToWatched(${item.id}, 'movie')">✓ Watched</button>` :
+                                `<button class="btn btn-secondary btn-small" onclick="event.stopPropagation(); addToWatched(${item.id}, 'movie')">✓ Watched</button>` :
                                 '<span style="color: var(--success); font-size: 12px;">✓ In Collection</span>'}
                         </div>
                         <button class="btn btn-small streaming-btn" onclick="event.stopPropagation(); showStreamingInfo(${item.id}, 'movie')" style="margin-top: 8px; width: 100%; background: var(--bg-secondary); border: 1px solid var(--border);">
@@ -1293,11 +1351,11 @@ function createMovieCard(movie, listType) {
 
             <div class="movie-actions">
                 ${listType === 'watchlist' ? `
-                    <button class="btn btn-secondary btn-small" onclick="moveToWatched(${movie.id}, '${mediaType}')">✓ Watched</button>
-                    <button class="btn btn-danger btn-small" onclick="removeFromWatchlist(${movie.id}, '${mediaType}')">Remove</button>
+                    <button class="btn btn-secondary btn-small" onclick="event.stopPropagation(); moveToWatched(${movie.id}, '${mediaType}')">✓ Watched</button>
+                    <button class="btn btn-danger btn-small" onclick="event.stopPropagation(); removeFromWatchlist(${movie.id}, '${mediaType}')">Remove</button>
                 ` : `
-                    <button class="btn btn-primary btn-small" onclick="openRatingModal(${movie.id}, '${mediaType}')">Rate</button>
-                    <button class="btn btn-danger btn-small" onclick="removeFromWatched(${movie.id}, '${mediaType}')">Remove</button>
+                    <button class="btn btn-primary btn-small" onclick="event.stopPropagation(); openRatingModal(${movie.id}, '${mediaType}')">Rate</button>
+                    <button class="btn btn-danger btn-small" onclick="event.stopPropagation(); removeFromWatched(${movie.id}, '${mediaType}')">Remove</button>
                 `}
             </div>
         </div>
