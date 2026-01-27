@@ -56,9 +56,18 @@ function initializeEventListeners() {
         }
     });
 
-    // Sort
+    // Sort and Filters
     document.getElementById('watchlist-sort').addEventListener('change', renderWatchlist);
     document.getElementById('watched-sort').addEventListener('change', renderWatched);
+
+    // Watchlist filters
+    document.getElementById('watchlist-type-filter').addEventListener('change', renderWatchlist);
+    document.getElementById('watchlist-genre-filter').addEventListener('change', renderWatchlist);
+
+    // Watched filters
+    document.getElementById('watched-type-filter').addEventListener('change', renderWatched);
+    document.getElementById('watched-genre-filter').addEventListener('change', renderWatched);
+    document.getElementById('watched-rating-filter').addEventListener('change', renderWatched);
 
     // Browse filters
     document.querySelectorAll('.filter-btn').forEach(btn => {
@@ -455,6 +464,20 @@ function showStreamingModal(providers, justWatchLink) {
     const rentProviders = providers.filter(p => p.type === 'Rent');
     const buyProviders = providers.filter(p => p.type === 'Buy');
 
+    // Helper to create clickable provider item
+    const createProviderItem = (p) => {
+        const link = justWatchLink || '#';
+        return `
+            <a href="${link}" target="_blank" style="text-align: center; text-decoration: none; cursor: pointer; transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.1)'" onmouseout="this.style.transform='scale(1)'">
+                <img src="${TMDB_IMAGE_BASE.replace('w500', 'w92')}${p.logo_path}"
+                    alt="${p.provider_name}"
+                    title="Watch on ${p.provider_name} (opens JustWatch)"
+                    style="width: 50px; height: 50px; border-radius: 10px; border: 2px solid var(--border);">
+                <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px; max-width: 60px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${p.provider_name}</div>
+            </a>
+        `;
+    };
+
     overlay.innerHTML = `
         <div style="
             background: var(--bg-card);
@@ -480,15 +503,7 @@ function showStreamingModal(providers, justWatchLink) {
                 <div style="margin-bottom: 20px;">
                     <h4 style="color: var(--text-secondary); font-size: 14px; margin-bottom: 10px;">Stream</h4>
                     <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                        ${streamProviders.map(p => `
-                            <div style="text-align: center;">
-                                <img src="${TMDB_IMAGE_BASE.replace('w500', 'w92')}${p.logo_path}"
-                                    alt="${p.provider_name}"
-                                    title="${p.provider_name}"
-                                    style="width: 50px; height: 50px; border-radius: 10px; border: 2px solid var(--border);">
-                                <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px; max-width: 60px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${p.provider_name}</div>
-                            </div>
-                        `).join('')}
+                        ${streamProviders.map(p => createProviderItem(p)).join('')}
                     </div>
                 </div>
             ` : ''}
@@ -497,15 +512,7 @@ function showStreamingModal(providers, justWatchLink) {
                 <div style="margin-bottom: 20px;">
                     <h4 style="color: var(--text-secondary); font-size: 14px; margin-bottom: 10px;">Rent</h4>
                     <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                        ${rentProviders.slice(0, 6).map(p => `
-                            <div style="text-align: center;">
-                                <img src="${TMDB_IMAGE_BASE.replace('w500', 'w92')}${p.logo_path}"
-                                    alt="${p.provider_name}"
-                                    title="${p.provider_name}"
-                                    style="width: 50px; height: 50px; border-radius: 10px; border: 2px solid var(--border);">
-                                <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px; max-width: 60px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${p.provider_name}</div>
-                            </div>
-                        `).join('')}
+                        ${rentProviders.slice(0, 6).map(p => createProviderItem(p)).join('')}
                     </div>
                 </div>
             ` : ''}
@@ -514,15 +521,7 @@ function showStreamingModal(providers, justWatchLink) {
                 <div style="margin-bottom: 20px;">
                     <h4 style="color: var(--text-secondary); font-size: 14px; margin-bottom: 10px;">Buy</h4>
                     <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                        ${buyProviders.slice(0, 6).map(p => `
-                            <div style="text-align: center;">
-                                <img src="${TMDB_IMAGE_BASE.replace('w500', 'w92')}${p.logo_path}"
-                                    alt="${p.provider_name}"
-                                    title="${p.provider_name}"
-                                    style="width: 50px; height: 50px; border-radius: 10px; border: 2px solid var(--border);">
-                                <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px; max-width: 60px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${p.provider_name}</div>
-                            </div>
-                        `).join('')}
+                        ${buyProviders.slice(0, 6).map(p => createProviderItem(p)).join('')}
                     </div>
                 </div>
             ` : ''}
@@ -534,7 +533,7 @@ function showStreamingModal(providers, justWatchLink) {
             ` : ''}
 
             <p style="font-size: 11px; color: var(--text-secondary); margin-top: 15px; text-align: center;">
-                Streaming data provided by JustWatch
+                Click any provider to view on JustWatch
             </p>
         </div>
     `;
@@ -1055,7 +1054,12 @@ function rateMovie(movieId, rating, mediaType = 'movie') {
 function renderWatchlist() {
     const container = document.getElementById('watchlist-grid');
     const sortBy = document.getElementById('watchlist-sort').value;
+    const typeFilter = document.getElementById('watchlist-type-filter').value;
+    const genreFilter = document.getElementById('watchlist-genre-filter').value;
     const clearBtn = document.getElementById('clear-watchlist-btn');
+
+    // Populate genre filter dropdown based on items in watchlist
+    populateGenreFilter('watchlist-genre-filter', movies.watchlist);
 
     if (movies.watchlist.length === 0) {
         clearBtn.style.display = 'none';
@@ -1071,8 +1075,23 @@ function renderWatchlist() {
     // Show clear button when there are items
     clearBtn.style.display = 'block';
 
+    // Apply filters
+    let filtered = [...movies.watchlist];
+
+    // Type filter
+    if (typeFilter !== 'all') {
+        filtered = filtered.filter(m => m.mediaType === typeFilter);
+    }
+
+    // Genre filter
+    if (genreFilter) {
+        filtered = filtered.filter(m =>
+            m.genres && m.genres.some(g => g.id.toString() === genreFilter)
+        );
+    }
+
     // Sort movies
-    const sorted = [...movies.watchlist].sort((a, b) => {
+    const sorted = filtered.sort((a, b) => {
         switch(sortBy) {
             case 'title':
                 return a.title.localeCompare(b.title);
@@ -1088,6 +1107,16 @@ function renderWatchlist() {
         }
     });
 
+    if (sorted.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-state-icon">🔍</div>
+                <div class="empty-state-text">No items match your filters</div>
+            </div>
+        `;
+        return;
+    }
+
     container.innerHTML = '';
     sorted.forEach(movie => {
         const card = createMovieCard(movie, 'watchlist');
@@ -1100,6 +1129,45 @@ function getDirector(movie) {
     if (!movie.crew || movie.crew.length === 0) return 'Unknown';
     const director = movie.crew.find(c => c.job === 'Director');
     return director ? director.name : 'Unknown';
+}
+
+// Helper function to populate genre filter dropdown based on items in a list
+function populateGenreFilter(selectId, items) {
+    const select = document.getElementById(selectId);
+    const currentValue = select.value;
+
+    // Collect all unique genres from the items
+    const genreMap = new Map();
+    items.forEach(item => {
+        if (item.genres) {
+            item.genres.forEach(genre => {
+                if (!genreMap.has(genre.id)) {
+                    genreMap.set(genre.id, genre.name);
+                }
+            });
+        }
+    });
+
+    // Sort genres alphabetically
+    const sortedGenres = [...genreMap.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+
+    // Clear existing options except first one
+    while (select.options.length > 1) {
+        select.remove(1);
+    }
+
+    // Add genre options
+    sortedGenres.forEach(([id, name]) => {
+        const option = document.createElement('option');
+        option.value = id;
+        option.textContent = name;
+        select.appendChild(option);
+    });
+
+    // Restore previously selected value if it still exists
+    if (currentValue && genreMap.has(parseInt(currentValue))) {
+        select.value = currentValue;
+    }
 }
 
 function clearWatchlist() {
@@ -1120,6 +1188,12 @@ function clearWatchlist() {
 function renderWatched() {
     const container = document.getElementById('watched-grid');
     const sortBy = document.getElementById('watched-sort').value;
+    const typeFilter = document.getElementById('watched-type-filter').value;
+    const genreFilter = document.getElementById('watched-genre-filter').value;
+    const ratingFilter = document.getElementById('watched-rating-filter').value;
+
+    // Populate genre filter dropdown based on items in watched list
+    populateGenreFilter('watched-genre-filter', movies.watched);
 
     if (movies.watched.length === 0) {
         container.innerHTML = `
@@ -1131,8 +1205,33 @@ function renderWatched() {
         return;
     }
 
+    // Apply filters
+    let filtered = [...movies.watched];
+
+    // Type filter
+    if (typeFilter !== 'all') {
+        filtered = filtered.filter(m => m.mediaType === typeFilter);
+    }
+
+    // Genre filter
+    if (genreFilter) {
+        filtered = filtered.filter(m =>
+            m.genres && m.genres.some(g => g.id.toString() === genreFilter)
+        );
+    }
+
+    // Rating filter
+    if (ratingFilter) {
+        if (ratingFilter === 'unrated') {
+            filtered = filtered.filter(m => !m.rating || m.rating === 0);
+        } else {
+            const minRating = parseInt(ratingFilter);
+            filtered = filtered.filter(m => m.rating && m.rating >= minRating);
+        }
+    }
+
     // Sort movies
-    const sorted = [...movies.watched].sort((a, b) => {
+    const sorted = filtered.sort((a, b) => {
         switch(sortBy) {
             case 'rating':
                 return (b.rating || 0) - (a.rating || 0);
@@ -1149,6 +1248,16 @@ function renderWatched() {
                 return new Date(b.watchedDate) - new Date(a.watchedDate);
         }
     });
+
+    if (sorted.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-state-icon">🔍</div>
+                <div class="empty-state-text">No items match your filters</div>
+            </div>
+        `;
+        return;
+    }
 
     container.innerHTML = '';
     sorted.forEach(movie => {

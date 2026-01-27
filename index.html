@@ -63,7 +63,15 @@
             <div class="list-container">
                 <div class="list-header">
                     <h2>My Watchlist</h2>
-                    <div class="filters" style="display: flex; gap: 10px; align-items: center;">
+                    <div class="filters" style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                        <select id="watchlist-type-filter" class="genre-filter">
+                            <option value="all">All Types</option>
+                            <option value="movie">Movies Only</option>
+                            <option value="tv">TV Shows Only</option>
+                        </select>
+                        <select id="watchlist-genre-filter" class="genre-filter">
+                            <option value="">All Genres</option>
+                        </select>
                         <select id="watchlist-sort">
                             <option value="added">Recently Added</option>
                             <option value="title">Title (A-Z)</option>
@@ -82,7 +90,24 @@
             <div class="list-container">
                 <div class="list-header">
                     <h2>Watched</h2>
-                    <div class="filters">
+                    <div class="filters" style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                        <select id="watched-type-filter" class="genre-filter">
+                            <option value="all">All Types</option>
+                            <option value="movie">Movies Only</option>
+                            <option value="tv">TV Shows Only</option>
+                        </select>
+                        <select id="watched-genre-filter" class="genre-filter">
+                            <option value="">All Genres</option>
+                        </select>
+                        <select id="watched-rating-filter" class="genre-filter">
+                            <option value="">All Ratings</option>
+                            <option value="9">9+ Stars</option>
+                            <option value="8">8+ Stars</option>
+                            <option value="7">7+ Stars</option>
+                            <option value="6">6+ Stars</option>
+                            <option value="5">5+ Stars</option>
+                            <option value="unrated">Unrated Only</option>
+                        </select>
                         <select id="watched-sort">
                             <option value="rating">Highest Rated</option>
                             <option value="date">Recently Watched</option>
