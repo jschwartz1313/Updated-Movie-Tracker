@@ -60,14 +60,16 @@ function initializeEventListeners() {
     document.getElementById('watchlist-sort').addEventListener('change', renderWatchlist);
     document.getElementById('watched-sort').addEventListener('change', renderWatched);
 
-    // Watchlist filters
+    // Watchlist filters and search
     document.getElementById('watchlist-type-filter').addEventListener('change', renderWatchlist);
     document.getElementById('watchlist-genre-filter').addEventListener('change', renderWatchlist);
+    document.getElementById('watchlist-search').addEventListener('input', renderWatchlist);
 
-    // Watched filters
+    // Watched filters and search
     document.getElementById('watched-type-filter').addEventListener('change', renderWatched);
     document.getElementById('watched-genre-filter').addEventListener('change', renderWatched);
     document.getElementById('watched-rating-filter').addEventListener('change', renderWatched);
+    document.getElementById('watched-search').addEventListener('input', renderWatched);
 
     // Browse filters
     document.querySelectorAll('.filter-btn').forEach(btn => {
@@ -1116,6 +1118,7 @@ function renderWatchlist() {
     const sortBy = document.getElementById('watchlist-sort').value;
     const typeFilter = document.getElementById('watchlist-type-filter').value;
     const genreFilter = document.getElementById('watchlist-genre-filter').value;
+    const searchQuery = document.getElementById('watchlist-search').value.trim().toLowerCase();
     const clearBtn = document.getElementById('clear-watchlist-btn');
 
     // Populate genre filter dropdown based on items in watchlist
@@ -1137,6 +1140,20 @@ function renderWatchlist() {
 
     // Apply filters
     let filtered = [...movies.watchlist];
+
+    // Search filter
+    if (searchQuery) {
+        filtered = filtered.filter(m => {
+            const title = (m.title || '').toLowerCase();
+            const director = getDirector(m).toLowerCase();
+            const cast = (m.cast || []).map(c => c.name.toLowerCase()).join(' ');
+            const genres = (m.genres || []).map(g => g.name.toLowerCase()).join(' ');
+            return title.includes(searchQuery) ||
+                   director.includes(searchQuery) ||
+                   cast.includes(searchQuery) ||
+                   genres.includes(searchQuery);
+        });
+    }
 
     // Type filter
     if (typeFilter !== 'all') {
@@ -1251,6 +1268,7 @@ function renderWatched() {
     const typeFilter = document.getElementById('watched-type-filter').value;
     const genreFilter = document.getElementById('watched-genre-filter').value;
     const ratingFilter = document.getElementById('watched-rating-filter').value;
+    const searchQuery = document.getElementById('watched-search').value.trim().toLowerCase();
 
     // Populate genre filter dropdown based on items in watched list
     populateGenreFilter('watched-genre-filter', movies.watched);
@@ -1267,6 +1285,20 @@ function renderWatched() {
 
     // Apply filters
     let filtered = [...movies.watched];
+
+    // Search filter
+    if (searchQuery) {
+        filtered = filtered.filter(m => {
+            const title = (m.title || '').toLowerCase();
+            const director = getDirector(m).toLowerCase();
+            const cast = (m.cast || []).map(c => c.name.toLowerCase()).join(' ');
+            const genres = (m.genres || []).map(g => g.name.toLowerCase()).join(' ');
+            return title.includes(searchQuery) ||
+                   director.includes(searchQuery) ||
+                   cast.includes(searchQuery) ||
+                   genres.includes(searchQuery);
+        });
+    }
 
     // Type filter
     if (typeFilter !== 'all') {
