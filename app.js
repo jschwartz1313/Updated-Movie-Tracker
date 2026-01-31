@@ -269,35 +269,23 @@ async function searchMovies() {
         const franchiseTerms = FRANCHISE_KEYWORDS[queryLower] || [];
         const isFranchiseSearch = franchiseTerms.length > 0;
 
-        // Build collection search promises - include original query + franchise terms
+        // Build collection search promises - use franchise terms for comprehensive collection finding
         const collectionSearchTerms = [query, ...franchiseTerms];
-        const uniqueTerms = [...new Set(collectionSearchTerms)];
+        const uniqueCollectionTerms = [...new Set(collectionSearchTerms)];
 
-        const collectionPromises = uniqueTerms.map(term =>
+        const collectionPromises = uniqueCollectionTerms.map(term =>
             fetch(`${TMDB_BASE_URL}/search/collection?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(term)}&page=1`)
                 .then(r => r.json())
         );
 
-        // For franchise searches, also search for each franchise term to get more results
+        // For movie/TV search, only search the original query (multiple pages for better coverage)
         const searchPromises = [];
-
-        // Always search the main query (multiple pages for franchise searches)
-        const pagesToFetch = isFranchiseSearch ? 3 : 1;
+        const pagesToFetch = isFranchiseSearch ? 3 : 2;
         for (let page = 1; page <= pagesToFetch; page++) {
             searchPromises.push(
                 fetch(`${TMDB_BASE_URL}/search/multi?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(query)}&page=${page}`)
                     .then(r => r.json())
             );
-        }
-
-        // For franchise searches, also search each related term
-        if (isFranchiseSearch) {
-            franchiseTerms.forEach(term => {
-                searchPromises.push(
-                    fetch(`${TMDB_BASE_URL}/search/multi?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(term)}&page=1`)
-                        .then(r => r.json())
-                );
-            });
         }
 
         // Fetch all searches and collections in parallel
@@ -318,7 +306,7 @@ async function searchMovies() {
             });
         });
 
-        // Merge all search results and remove duplicates
+        // Merge search results and remove duplicates
         const seenIds = new Set();
         let allResults = [];
         searchResults.forEach(data => {
