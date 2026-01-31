@@ -179,38 +179,62 @@ function refreshCurrentView() {
 
 // Franchise keyword mapping - search these additional terms for better collection results
 const FRANCHISE_KEYWORDS = {
-    'marvel': ['Avengers', 'Iron Man', 'Thor', 'Captain America', 'Spider-Man', 'Guardians of the Galaxy', 'Black Panther', 'Ant-Man', 'Doctor Strange', 'X-Men', 'Deadpool'],
-    'mcu': ['Avengers', 'Iron Man', 'Thor', 'Captain America', 'Spider-Man', 'Guardians of the Galaxy', 'Black Panther', 'Ant-Man', 'Doctor Strange'],
-    'star wars': ['Star Wars'],
-    'starwars': ['Star Wars'],
-    'dc': ['Batman', 'Superman', 'Wonder Woman', 'Justice League', 'Aquaman', 'The Flash', 'Suicide Squad'],
-    'dceu': ['Batman', 'Superman', 'Wonder Woman', 'Justice League', 'Aquaman'],
-    'pixar': ['Toy Story', 'Finding Nemo', 'The Incredibles', 'Cars', 'Monsters, Inc'],
-    'harry potter': ['Harry Potter', 'Fantastic Beasts'],
-    'lord of the rings': ['Lord of the Rings', 'The Hobbit'],
-    'lotr': ['Lord of the Rings', 'The Hobbit'],
-    'fast and furious': ['Fast & Furious', 'Fast and Furious'],
+    'marvel': ['Avengers', 'Iron Man', 'Thor', 'Captain America', 'Spider-Man', 'Guardians of the Galaxy', 'Black Panther', 'Ant-Man', 'Doctor Strange', 'X-Men', 'Deadpool', 'Hulk', 'Black Widow', 'Hawkeye', 'Loki', 'Eternals', 'Shang-Chi'],
+    'mcu': ['Avengers', 'Iron Man', 'Thor', 'Captain America', 'Spider-Man', 'Guardians of the Galaxy', 'Black Panther', 'Ant-Man', 'Doctor Strange', 'Eternals', 'Shang-Chi'],
+    'star wars': ['Star Wars', 'Mandalorian', 'Obi-Wan', 'Boba Fett', 'Andor', 'Ahsoka', 'Clone Wars', 'Bad Batch', 'Rogue One', 'Solo'],
+    'starwars': ['Star Wars', 'Mandalorian', 'Obi-Wan', 'Boba Fett', 'Andor', 'Ahsoka', 'Clone Wars', 'Bad Batch'],
+    'dc': ['Batman', 'Superman', 'Wonder Woman', 'Justice League', 'Aquaman', 'The Flash', 'Suicide Squad', 'Shazam', 'Black Adam', 'Joker', 'Harley Quinn', 'Peacemaker'],
+    'dceu': ['Batman', 'Superman', 'Wonder Woman', 'Justice League', 'Aquaman', 'Shazam', 'Black Adam'],
+    'pixar': ['Toy Story', 'Finding Nemo', 'Finding Dory', 'The Incredibles', 'Cars', 'Monsters, Inc', 'Monsters University', 'Up', 'Wall-E', 'Coco', 'Inside Out', 'Soul', 'Luca', 'Turning Red', 'Elemental', 'Ratatouille', 'Brave'],
+    'disney': ['Frozen', 'Moana', 'Tangled', 'Encanto', 'Zootopia', 'Big Hero 6', 'Wreck-It Ralph', 'Lion King', 'Aladdin', 'Little Mermaid', 'Beauty and the Beast'],
+    'harry potter': ['Harry Potter', 'Fantastic Beasts', 'Hogwarts'],
+    'wizarding world': ['Harry Potter', 'Fantastic Beasts'],
+    'lord of the rings': ['Lord of the Rings', 'The Hobbit', 'Rings of Power'],
+    'lotr': ['Lord of the Rings', 'The Hobbit', 'Rings of Power'],
+    'tolkien': ['Lord of the Rings', 'The Hobbit', 'Rings of Power'],
+    'fast and furious': ['Fast & Furious', 'Fast and Furious', 'Furious'],
+    'fast & furious': ['Fast & Furious', 'Fast and Furious', 'Furious'],
     'jurassic': ['Jurassic Park', 'Jurassic World'],
-    'transformers': ['Transformers'],
-    'mission impossible': ['Mission: Impossible'],
-    'james bond': ['James Bond'],
-    'bond': ['James Bond'],
-    '007': ['James Bond'],
+    'jurassic park': ['Jurassic Park', 'Jurassic World'],
+    'transformers': ['Transformers', 'Bumblebee'],
+    'mission impossible': ['Mission: Impossible', 'Mission Impossible'],
+    'james bond': ['James Bond', '007'],
+    'bond': ['James Bond', '007'],
+    '007': ['James Bond', '007'],
     'john wick': ['John Wick'],
-    'matrix': ['The Matrix'],
+    'matrix': ['The Matrix', 'Matrix'],
     'indiana jones': ['Indiana Jones'],
     'pirates': ['Pirates of the Caribbean'],
-    'shrek': ['Shrek'],
+    'pirates of the caribbean': ['Pirates of the Caribbean'],
+    'shrek': ['Shrek', 'Puss in Boots'],
+    'dreamworks': ['Shrek', 'How to Train Your Dragon', 'Kung Fu Panda', 'Madagascar', 'Trolls', 'Boss Baby'],
     'despicable me': ['Despicable Me', 'Minions'],
     'minions': ['Despicable Me', 'Minions'],
     'kung fu panda': ['Kung Fu Panda'],
     'how to train your dragon': ['How to Train Your Dragon'],
-    'planet of the apes': ['Planet of the Apes'],
-    'alien': ['Alien'],
-    'predator': ['Predator'],
+    'planet of the apes': ['Planet of the Apes', 'Apes'],
+    'alien': ['Alien', 'Aliens', 'Prometheus', 'Covenant'],
+    'predator': ['Predator', 'Prey'],
     'terminator': ['Terminator'],
     'rocky': ['Rocky', 'Creed'],
-    'creed': ['Rocky', 'Creed']
+    'creed': ['Rocky', 'Creed'],
+    'godzilla': ['Godzilla', 'Kong', 'Monsterverse'],
+    'monsterverse': ['Godzilla', 'Kong'],
+    'conjuring': ['Conjuring', 'Annabelle', 'Nun'],
+    'horror': ['Conjuring', 'Insidious', 'Paranormal Activity', 'Scream', 'Halloween'],
+    'scream': ['Scream'],
+    'halloween': ['Halloween', 'Michael Myers'],
+    'nightmare': ['Nightmare on Elm Street', 'Freddy'],
+    'friday the 13th': ['Friday the 13th', 'Jason'],
+    'saw': ['Saw', 'Jigsaw'],
+    'purge': ['Purge'],
+    'trek': ['Star Trek'],
+    'star trek': ['Star Trek'],
+    'avatar': ['Avatar'],
+    'hunger games': ['Hunger Games', 'Mockingjay', 'Catching Fire'],
+    'twilight': ['Twilight', 'Breaking Dawn', 'New Moon', 'Eclipse'],
+    'maze runner': ['Maze Runner'],
+    'divergent': ['Divergent', 'Insurgent', 'Allegiant']
 };
 
 async function searchMovies() {
@@ -243,6 +267,7 @@ async function searchMovies() {
         // Check if query matches a franchise keyword
         const queryLower = query.toLowerCase();
         const franchiseTerms = FRANCHISE_KEYWORDS[queryLower] || [];
+        const isFranchiseSearch = franchiseTerms.length > 0;
 
         // Build collection search promises - include original query + franchise terms
         const collectionSearchTerms = [query, ...franchiseTerms];
@@ -253,13 +278,33 @@ async function searchMovies() {
                 .then(r => r.json())
         );
 
-        // Fetch multi-search and all collection searches in parallel
-        const [multiResponse, ...collectionResults] = await Promise.all([
-            fetch(`${TMDB_BASE_URL}/search/multi?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(query)}&page=1`),
-            ...collectionPromises
-        ]);
+        // For franchise searches, also search for each franchise term to get more results
+        const searchPromises = [];
 
-        const multiData = await multiResponse.json();
+        // Always search the main query (multiple pages for franchise searches)
+        const pagesToFetch = isFranchiseSearch ? 3 : 1;
+        for (let page = 1; page <= pagesToFetch; page++) {
+            searchPromises.push(
+                fetch(`${TMDB_BASE_URL}/search/multi?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(query)}&page=${page}`)
+                    .then(r => r.json())
+            );
+        }
+
+        // For franchise searches, also search each related term
+        if (isFranchiseSearch) {
+            franchiseTerms.forEach(term => {
+                searchPromises.push(
+                    fetch(`${TMDB_BASE_URL}/search/multi?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(term)}&page=1`)
+                        .then(r => r.json())
+                );
+            });
+        }
+
+        // Fetch all searches and collections in parallel
+        const [collectionResults, searchResults] = await Promise.all([
+            Promise.all(collectionPromises),
+            Promise.all(searchPromises)
+        ]);
 
         // Merge all collection results and remove duplicates
         const allCollections = [];
@@ -273,9 +318,21 @@ async function searchMovies() {
             });
         });
 
+        // Merge all search results and remove duplicates
+        const seenIds = new Set();
+        let allResults = [];
+        searchResults.forEach(data => {
+            (data.results || []).forEach(item => {
+                const uniqueKey = `${item.media_type}-${item.id}`;
+                if (!seenIds.has(uniqueKey) && item.media_type !== 'person') {
+                    seenIds.add(uniqueKey);
+                    allResults.push(item);
+                }
+            });
+        });
+
         // Filter results based on media type selection
-        let results = (multiData.results || []).filter(item => {
-            if (item.media_type === 'person') return false; // Skip people
+        let results = allResults.filter(item => {
             if (mediaTypeFilter === 'movie') return item.media_type === 'movie';
             if (mediaTypeFilter === 'tv') return item.media_type === 'tv';
             return true;
@@ -286,6 +343,9 @@ async function searchMovies() {
             ...item,
             mediaType: item.media_type || 'movie'
         }));
+
+        // Sort results by popularity for better ordering
+        results.sort((a, b) => (b.popularity || 0) - (a.popularity || 0));
 
         if (results.length > 0 || allCollections.length > 0) {
             renderSearchResults(results, mediaTypeFilter, query, allCollections);
@@ -336,7 +396,7 @@ function renderSearchGrid(results, query, collections = []) {
             <div class="collections-section" style="margin-bottom: 30px;">
                 <h3 style="margin-bottom: 15px; color: var(--text-primary);">Collections & Franchises</h3>
                 <div class="collections-grid" style="display: flex; gap: 15px; flex-wrap: wrap;">
-                    ${collections.slice(0, 12).map(collection => `
+                    ${collections.slice(0, 20).map(collection => `
                         <div class="collection-card" onclick="loadCollection(${collection.id})" style="
                             cursor: pointer;
                             background: var(--bg-card);
@@ -371,7 +431,7 @@ function renderSearchGrid(results, query, collections = []) {
 
     const grid = container.querySelector('.movie-grid');
 
-    results.slice(0, 40).forEach(item => {
+    results.slice(0, 60).forEach(item => {
         const mediaType = item.media_type || item.mediaType || 'movie';
         const title = item.title || item.name;
         const releaseDate = item.release_date || item.first_air_date;
