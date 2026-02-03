@@ -71,6 +71,9 @@ function initializeEventListeners() {
     document.getElementById('watched-rating-filter').addEventListener('change', renderWatched);
     document.getElementById('watched-search').addEventListener('input', renderWatched);
 
+    // Recommendations filter
+    document.getElementById('rec-type-filter').addEventListener('change', renderRecommendationsGrid);
+
     // Browse filters
     document.querySelectorAll('.filter-btn').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -129,6 +132,9 @@ function switchView(viewName) {
         case 'watched':
             renderWatched();
             break;
+        case 'recommendations':
+            loadRecommendations();
+            break;
         case 'stats':
             updateStats();
             break;
@@ -168,6 +174,9 @@ function refreshCurrentView() {
             break;
         case 'watched':
             renderWatched();
+            break;
+        case 'recommendations':
+            renderRecommendationsGrid();
             break;
         case 'stats':
             updateStats();
@@ -1657,6 +1666,242 @@ function closeModal() {
     // Refresh the current view to show updated ratings
     const activeView = document.querySelector('.nav-btn.active').dataset.view;
     if (activeView === 'watched') renderWatched();
+}
+
+// ============= Recommendations =============
+
+let cachedRecommendations = [];
+
+async function loadRecommendations() {
+    const container = document.getElementById('recommendations-grid');
+    const description = document.getElementById('rec-description');
+
+    // Need watched items to make recommendations
+    if (movies.watched.length === 0 && movies.watchlist.length === 0) {
+        description.textContent = '';
+        container.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-state-icon">🎯</div>
+                <div class="empty-state-text">Add movies and TV shows to your watched list to get personalized recommendations!</div>
+            </div>
+        `;
+        return;
+    }
+
+    container.innerHTML = `<div class="loading"><div class="spinner"></div>Finding recommendations for you...</div>`;
+
+    try {
+        // 1. Analyze user's preferences
+        const topRated = [...movies.watched]
+            .filter(m => m.rating && m.rating >= 7)
+            .sort((a, b) => b.rating - a.rating)
+            .slice(0, 8);
+
+        const recentWatched = [...movies.watched]
+            .sort((a, b) => new Date(b.watchedDate) - new Date(a.watchedDate))
+            .slice(0, 5);
+
+        // Combine top rated + recent, deduplicate
+        const seedItems = [];
+        const seenSeedIds = new Set();
+        [...topRated, ...recentWatched].forEach(item => {
+            const key = `${item.mediaType}-${item.id}`;
+            if (!seenSeedIds.has(key)) {
+                seenSeedIds.add(key);
+                seedItems.push(item);
+            }
+        });
+
+        // If no rated items, use watchlist + whatever is in watched
+        if (seedItems.length === 0) {
+            const fallback = [...movies.watched, ...movies.watchlist].slice(0, 6);
+            fallback.forEach(item => {
+                const key = `${item.mediaType}-${item.id}`;
+                if (!seenSeedIds.has(key)) {
+                    seenSeedIds.add(key);
+                    seedItems.push(item);
+                }
+            });
+        }
+
+        // 2. Get user's favorite genres (weighted by rating)
+        const genreScores = {};
+        movies.watched.forEach(m => {
+            if (m.genres) {
+                const weight = m.rating ? m.rating / 10 : 0.5;
+                m.genres.forEach(g => {
+                    genreScores[g.id] = (genreScores[g.id] || 0) + weight;
+                });
+            }
+        });
+        const topGenreIds = Object.entries(genreScores)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 3)
+            .map(([id]) => id);
+
+        // 3. Build all existing IDs to exclude (watchlist + watched)
+        const existingIds = new Set();
+        movies.watchlist.forEach(m => existingIds.add(`${m.mediaType || 'movie'}-${m.id}`));
+        movies.watched.forEach(m => existingIds.add(`${m.mediaType || 'movie'}-${m.id}`));
+
+        // 4. Fetch recommendations from TMDB for seed items
+        const recPromises = seedItems.slice(0, 6).map(item => {
+            const mt = item.mediaType || 'movie';
+            return fetch(`${TMDB_BASE_URL}/${mt}/${item.id}/recommendations?api_key=${TMDB_API_KEY}&page=1`)
+                .then(r => r.json())
+                .then(data => (data.results || []).map(r => ({ ...r, mediaType: mt, source: item.title })))
+                .catch(() => []);
+        });
+
+        // 5. Also fetch "similar" for top 3 highest rated
+        const simPromises = seedItems.slice(0, 3).map(item => {
+            const mt = item.mediaType || 'movie';
+            return fetch(`${TMDB_BASE_URL}/${mt}/${item.id}/similar?api_key=${TMDB_API_KEY}&page=1`)
+                .then(r => r.json())
+                .then(data => (data.results || []).map(r => ({ ...r, mediaType: mt, source: item.title })))
+                .catch(() => []);
+        });
+
+        // 6. Also fetch discover based on top genres
+        const discoverPromises = [];
+        if (topGenreIds.length > 0) {
+            const genreStr = topGenreIds.join(',');
+            // Discover highly rated movies in user's fav genres
+            discoverPromises.push(
+                fetch(`${TMDB_BASE_URL}/discover/movie?api_key=${TMDB_API_KEY}&sort_by=vote_average.desc&vote_count.gte=500&vote_average.gte=7.0&with_genres=${genreStr}&page=1`)
+                    .then(r => r.json())
+                    .then(data => (data.results || []).map(r => ({ ...r, mediaType: 'movie', source: 'Your Genres' })))
+                    .catch(() => [])
+            );
+            discoverPromises.push(
+                fetch(`${TMDB_BASE_URL}/discover/tv?api_key=${TMDB_API_KEY}&sort_by=vote_average.desc&vote_count.gte=200&vote_average.gte=7.5&with_genres=${genreStr}&page=1`)
+                    .then(r => r.json())
+                    .then(data => (data.results || []).map(r => ({ ...r, mediaType: 'tv', source: 'Your Genres' })))
+                    .catch(() => [])
+            );
+        }
+
+        // 7. Fetch all in parallel
+        const [recResults, simResults, discoverResults] = await Promise.all([
+            Promise.all(recPromises),
+            Promise.all(simPromises),
+            Promise.all(discoverPromises)
+        ]);
+
+        // 8. Merge, deduplicate, and exclude already seen
+        const allRecs = [];
+        const seenRecIds = new Set();
+
+        const addRecs = (items, priority) => {
+            items.forEach(batch => {
+                batch.forEach(item => {
+                    const key = `${item.mediaType}-${item.id}`;
+                    if (!seenRecIds.has(key) && !existingIds.has(key)) {
+                        seenRecIds.add(key);
+                        allRecs.push({ ...item, priority });
+                    }
+                });
+            });
+        };
+
+        // Recommendations from top rated get highest priority
+        addRecs(recResults, 3);
+        // Similar movies get medium priority
+        addRecs(simResults, 2);
+        // Genre-based discover gets lower priority
+        addRecs(discoverResults, 1);
+
+        // 9. Sort: priority first, then by vote average
+        allRecs.sort((a, b) => {
+            if (b.priority !== a.priority) return b.priority - a.priority;
+            return (b.vote_average || 0) - (a.vote_average || 0);
+        });
+
+        // Cache for re-rendering without API calls
+        cachedRecommendations = allRecs;
+
+        // 10. Build description
+        const seedTitles = seedItems.slice(0, 3).map(s => s.title).join(', ');
+        description.textContent = `Based on ${seedTitles}${seedItems.length > 3 ? ` and ${seedItems.length - 3} more` : ''} from your collection`;
+
+        renderRecommendationsGrid();
+
+    } catch (error) {
+        console.error('Recommendations error:', error);
+        container.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-state-icon">❌</div>
+                <div class="empty-state-text">Error loading recommendations. Try again.</div>
+            </div>
+        `;
+    }
+}
+
+function renderRecommendationsGrid() {
+    const container = document.getElementById('recommendations-grid');
+    const typeFilter = document.getElementById('rec-type-filter').value;
+
+    let recs = [...cachedRecommendations];
+
+    // Re-check existing IDs (in case user added something since loading)
+    const existingIds = new Set();
+    movies.watchlist.forEach(m => existingIds.add(`${m.mediaType || 'movie'}-${m.id}`));
+    movies.watched.forEach(m => existingIds.add(`${m.mediaType || 'movie'}-${m.id}`));
+    recs = recs.filter(item => !existingIds.has(`${item.mediaType}-${item.id}`));
+
+    // Type filter
+    if (typeFilter !== 'all') {
+        recs = recs.filter(r => r.mediaType === typeFilter);
+    }
+
+    if (recs.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-state-icon">🎯</div>
+                <div class="empty-state-text">No recommendations found. Rate more movies to improve suggestions!</div>
+            </div>
+        `;
+        return;
+    }
+
+    container.innerHTML = '';
+    recs.slice(0, 40).forEach(item => {
+        const mediaType = item.mediaType || 'movie';
+        const title = item.title || item.name;
+        const releaseDate = item.release_date || item.first_air_date;
+        const isInWatchlist = movies.watchlist.some(m => m.id === item.id && (m.mediaType || 'movie') === mediaType);
+        const isWatched = movies.watched.some(m => m.id === item.id && (m.mediaType || 'movie') === mediaType);
+
+        const card = document.createElement('div');
+        card.className = 'movie-card';
+        card.innerHTML = `
+            <img
+                src="${item.poster_path ? TMDB_IMAGE_BASE + item.poster_path : 'https://via.placeholder.com/500x750?text=No+Poster'}"
+                alt="${title}"
+                class="movie-poster"
+            />
+            <div class="movie-info">
+                <div class="movie-title">${title}</div>
+                <div class="movie-year">${releaseDate ? releaseDate.split('-')[0] : 'N/A'} ${mediaType === 'tv' ? '• TV' : ''}</div>
+                ${item.vote_average ? `<div style="margin: 5px 0; font-size: 13px; color: var(--text-secondary);">⭐ ${item.vote_average.toFixed(1)}/10</div>` : ''}
+                ${item.source ? `<div style="font-size: 11px; color: var(--accent); margin-bottom: 5px;">Because you liked: ${item.source}</div>` : ''}
+                <div class="movie-actions">
+                    ${!isInWatchlist && !isWatched ?
+                        `<button class="btn btn-primary btn-small" onclick="event.stopPropagation(); addToWatchlist(${item.id}, '${mediaType}')">+ Watchlist</button>` :
+                        ''}
+                    ${!isWatched ?
+                        `<button class="btn btn-secondary btn-small" onclick="event.stopPropagation(); addToWatched(${item.id}, '${mediaType}')">✓ Watched</button>` :
+                        '<span style="color: var(--success); font-size: 12px;">✓ In Collection</span>'}
+                </div>
+                <button class="btn btn-small streaming-btn" onclick="event.stopPropagation(); showStreamingInfo(${item.id}, '${mediaType}')" style="margin-top: 8px; width: 100%; background: var(--bg-secondary); border: 1px solid var(--border);">
+                    📺 Where to Watch
+                </button>
+            </div>
+        `;
+
+        card.querySelector('.movie-poster').addEventListener('click', () => showMediaDetail(item.id, null, mediaType));
+        container.appendChild(card);
+    });
 }
 
 // ============= Statistics =============

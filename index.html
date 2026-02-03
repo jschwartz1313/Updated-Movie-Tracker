@@ -15,6 +15,7 @@
                 <button class="nav-btn active" data-view="browse">Browse</button>
                 <button class="nav-btn" data-view="watchlist">Watchlist <span class="badge" id="watchlist-count">0</span></button>
                 <button class="nav-btn" data-view="watched">Watched <span class="badge" id="watched-count">0</span></button>
+                <button class="nav-btn" data-view="recommendations">For You</button>
                 <button class="nav-btn" data-view="stats">Stats</button>
             </nav>
             <button class="theme-toggle" id="theme-toggle" title="Toggle dark/light mode">
@@ -124,6 +125,25 @@
                     </div>
                 </div>
                 <div class="movie-grid" id="watched-grid"></div>
+            </div>
+        </section>
+
+        <!-- Recommendations View -->
+        <section class="view" id="recommendations-view">
+            <div class="list-container">
+                <div class="list-header">
+                    <h2>Recommended For You</h2>
+                    <div class="filters" style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                        <select id="rec-type-filter" class="genre-filter">
+                            <option value="all">All Types</option>
+                            <option value="movie">Movies Only</option>
+                            <option value="tv">TV Shows Only</option>
+                        </select>
+                        <button class="btn btn-primary btn-small" id="refresh-recs-btn" onclick="loadRecommendations()">Refresh</button>
+                    </div>
+                </div>
+                <p id="rec-description" style="color: var(--text-secondary); margin-bottom: 20px;">Based on your watched list, ratings, and favorite genres</p>
+                <div class="movie-grid" id="recommendations-grid"></div>
             </div>
         </section>
 
