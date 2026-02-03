@@ -387,12 +387,30 @@ function renderSearchGrid(results, query, collections = []) {
         Search results for "${query}" - ${results.length} items found
     </div>`;
 
-    // Show collections if any
+    // Show collections if any (collapsible, hidden by default)
     if (collections.length > 0) {
         html += `
             <div class="collections-section" style="margin-bottom: 30px;">
-                <h3 style="margin-bottom: 15px; color: var(--text-primary);">Collections & Franchises</h3>
-                <div class="collections-grid" style="display: flex; gap: 15px; flex-wrap: wrap;">
+                <div class="collections-toggle" onclick="toggleCollections()" style="
+                    cursor: pointer;
+                    display: flex;
+                    align-items: center;
+                    gap: 10px;
+                    padding: 12px 16px;
+                    background: var(--bg-card);
+                    border: 1px solid var(--border);
+                    border-radius: 10px;
+                    user-select: none;
+                    transition: all 0.2s;
+                ">
+                    <span class="collections-arrow" id="collections-arrow" style="
+                        display: inline-block;
+                        transition: transform 0.3s;
+                        font-size: 14px;
+                    ">&#9654;</span>
+                    <h3 style="margin: 0; color: var(--text-primary); font-size: 16px;">Collections & Franchises (${collections.length} found)</h3>
+                </div>
+                <div class="collections-grid" id="collections-grid" style="display: none; gap: 15px; flex-wrap: wrap; margin-top: 15px;">
                     ${collections.slice(0, 20).map(collection => `
                         <div class="collection-card" onclick="loadCollection(${collection.id})" style="
                             cursor: pointer;
@@ -432,6 +450,10 @@ function renderSearchGrid(results, query, collections = []) {
         const mediaType = item.media_type || item.mediaType || 'movie';
         const title = item.title || item.name;
         const releaseDate = item.release_date || item.first_air_date;
+
+        // Skip hidden items
+        if (isItemHidden(item.id, mediaType)) return;
+
         const isInWatchlist = movies.watchlist.some(m => m.id === item.id && (m.mediaType || 'movie') === mediaType);
         const isWatched = movies.watched.some(m => m.id === item.id && (m.mediaType || 'movie') === mediaType);
 
@@ -457,6 +479,9 @@ function renderSearchGrid(results, query, collections = []) {
                 </div>
                 <button class="btn btn-small streaming-btn" onclick="event.stopPropagation(); showStreamingInfo(${item.id}, '${mediaType}')" style="margin-top: 8px; width: 100%; background: var(--bg-secondary); border: 1px solid var(--border);">
                     📺 Where to Watch
+                </button>
+                <button class="btn btn-small" onclick="event.stopPropagation(); hideItem(${item.id}, '${mediaType}')" style="margin-top: 4px; width: 100%; background: transparent; border: 1px solid var(--border); color: var(--text-secondary); font-size: 11px;">
+                    🚫 Not Interested
                 </button>
             </div>
         `;
@@ -489,6 +514,10 @@ function renderBrowseGrid(results, mediaType, query = null, year = null) {
     displayResults.forEach(item => {
         const title = item.title || item.name;
         const releaseDate = item.release_date || item.first_air_date;
+
+        // Skip hidden items
+        if (isItemHidden(item.id, mediaType)) return;
+
         const isInWatchlist = movies.watchlist.some(m => m.id === item.id && (m.mediaType || 'movie') === mediaType);
         const isWatched = movies.watched.some(m => m.id === item.id && (m.mediaType || 'movie') === mediaType);
 
@@ -514,6 +543,9 @@ function renderBrowseGrid(results, mediaType, query = null, year = null) {
                 </div>
                 <button class="btn btn-small streaming-btn" onclick="event.stopPropagation(); showStreamingInfo(${item.id}, '${mediaType}')" style="margin-top: 8px; width: 100%; background: var(--bg-secondary); border: 1px solid var(--border);">
                     📺 Where to Watch
+                </button>
+                <button class="btn btn-small" onclick="event.stopPropagation(); hideItem(${item.id}, '${mediaType}')" style="margin-top: 4px; width: 100%; background: transparent; border: 1px solid var(--border); color: var(--text-secondary); font-size: 11px;">
+                    🚫 Not Interested
                 </button>
             </div>
         `;
@@ -700,6 +732,9 @@ async function loadCollection(collectionId) {
 
             const grid = resultsContainer.querySelector('.movie-grid');
             sortedParts.forEach(item => {
+                // Skip hidden items
+                if (isItemHidden(item.id, 'movie')) return;
+
                 const isInWatchlist = movies.watchlist.some(m => m.id === item.id && (m.mediaType || 'movie') === 'movie');
                 const isWatched = movies.watched.some(m => m.id === item.id && (m.mediaType || 'movie') === 'movie');
 
@@ -725,6 +760,9 @@ async function loadCollection(collectionId) {
                         </div>
                         <button class="btn btn-small streaming-btn" onclick="event.stopPropagation(); showStreamingInfo(${item.id}, 'movie')" style="margin-top: 8px; width: 100%; background: var(--bg-secondary); border: 1px solid var(--border);">
                             📺 Where to Watch
+                        </button>
+                        <button class="btn btn-small" onclick="event.stopPropagation(); hideItem(${item.id}, 'movie')" style="margin-top: 4px; width: 100%; background: transparent; border: 1px solid var(--border); color: var(--text-secondary); font-size: 11px;">
+                            🚫 Not Interested
                         </button>
                     </div>
                 `;
@@ -1695,7 +1733,7 @@ async function loadRecommendations() {
         const topRated = [...movies.watched]
             .filter(m => m.rating && m.rating >= 7)
             .sort((a, b) => b.rating - a.rating)
-            .slice(0, 8);
+            .slice(0, 10);
 
         const recentWatched = [...movies.watched]
             .sort((a, b) => new Date(b.watchedDate) - new Date(a.watchedDate))
@@ -1726,76 +1764,113 @@ async function loadRecommendations() {
 
         // 2. Get user's favorite genres (weighted by rating)
         const genreScores = {};
+        const genreNames = {};
         movies.watched.forEach(m => {
             if (m.genres) {
                 const weight = m.rating ? m.rating / 10 : 0.5;
                 m.genres.forEach(g => {
                     genreScores[g.id] = (genreScores[g.id] || 0) + weight;
+                    genreNames[g.id] = g.name;
                 });
             }
         });
-        const topGenreIds = Object.entries(genreScores)
+        const topGenres = Object.entries(genreScores)
             .sort((a, b) => b[1] - a[1])
-            .slice(0, 3)
-            .map(([id]) => id);
+            .slice(0, 5);
+        const topGenreIds = topGenres.map(([id]) => id);
 
-        // 3. Build all existing IDs to exclude (watchlist + watched)
+        // 3. Get user's favorite directors
+        const directorScores = {};
+        movies.watched.forEach(m => {
+            if (m.crew) {
+                const director = m.crew.find(c => c.job === 'Director');
+                if (director) {
+                    const weight = m.rating ? m.rating / 10 : 0.5;
+                    directorScores[director.id] = directorScores[director.id] || { name: director.name, score: 0, id: director.id };
+                    directorScores[director.id].score += weight;
+                }
+            }
+        });
+        const topDirectors = Object.values(directorScores)
+            .sort((a, b) => b.score - a.score)
+            .slice(0, 3);
+
+        // 4. Build all existing IDs to exclude (watchlist + watched)
         const existingIds = new Set();
         movies.watchlist.forEach(m => existingIds.add(`${m.mediaType || 'movie'}-${m.id}`));
         movies.watched.forEach(m => existingIds.add(`${m.mediaType || 'movie'}-${m.id}`));
 
-        // 4. Fetch recommendations from TMDB for seed items
-        const recPromises = seedItems.slice(0, 6).map(item => {
+        // 5. Fetch recommendations from TMDB for seed items
+        const recPromises = seedItems.slice(0, 8).map(item => {
             const mt = item.mediaType || 'movie';
             return fetch(`${TMDB_BASE_URL}/${mt}/${item.id}/recommendations?api_key=${TMDB_API_KEY}&page=1`)
                 .then(r => r.json())
-                .then(data => (data.results || []).map(r => ({ ...r, mediaType: mt, source: item.title })))
+                .then(data => (data.results || []).map(r => ({ ...r, mediaType: mt, source: item.title, section: 'pick' })))
                 .catch(() => []);
         });
 
-        // 5. Also fetch "similar" for top 3 highest rated
-        const simPromises = seedItems.slice(0, 3).map(item => {
+        // 6. Also fetch "similar" for top 5 highest rated
+        const simPromises = seedItems.slice(0, 5).map(item => {
             const mt = item.mediaType || 'movie';
             return fetch(`${TMDB_BASE_URL}/${mt}/${item.id}/similar?api_key=${TMDB_API_KEY}&page=1`)
                 .then(r => r.json())
-                .then(data => (data.results || []).map(r => ({ ...r, mediaType: mt, source: item.title })))
+                .then(data => (data.results || []).map(r => ({ ...r, mediaType: mt, source: item.title, section: 'similar' })))
                 .catch(() => []);
         });
 
-        // 6. Also fetch discover based on top genres
-        const discoverPromises = [];
-        if (topGenreIds.length > 0) {
-            const genreStr = topGenreIds.join(',');
-            // Discover highly rated movies in user's fav genres
-            discoverPromises.push(
-                fetch(`${TMDB_BASE_URL}/discover/movie?api_key=${TMDB_API_KEY}&sort_by=vote_average.desc&vote_count.gte=500&vote_average.gte=7.0&with_genres=${genreStr}&page=1`)
+        // 7. Fetch discover for EACH top genre individually (for genre sections)
+        const genreDiscoverPromises = topGenres.slice(0, 4).map(([genreId]) => {
+            return Promise.all([
+                fetch(`${TMDB_BASE_URL}/discover/movie?api_key=${TMDB_API_KEY}&sort_by=vote_average.desc&vote_count.gte=500&vote_average.gte=7.0&with_genres=${genreId}&page=1`)
                     .then(r => r.json())
-                    .then(data => (data.results || []).map(r => ({ ...r, mediaType: 'movie', source: 'Your Genres' })))
-                    .catch(() => [])
-            );
-            discoverPromises.push(
-                fetch(`${TMDB_BASE_URL}/discover/tv?api_key=${TMDB_API_KEY}&sort_by=vote_average.desc&vote_count.gte=200&vote_average.gte=7.5&with_genres=${genreStr}&page=1`)
+                    .then(data => (data.results || []).map(r => ({ ...r, mediaType: 'movie', source: genreNames[genreId], section: 'genre', genreId: genreId, genreName: genreNames[genreId] })))
+                    .catch(() => []),
+                fetch(`${TMDB_BASE_URL}/discover/tv?api_key=${TMDB_API_KEY}&sort_by=vote_average.desc&vote_count.gte=200&vote_average.gte=7.5&with_genres=${genreId}&page=1`)
                     .then(r => r.json())
-                    .then(data => (data.results || []).map(r => ({ ...r, mediaType: 'tv', source: 'Your Genres' })))
+                    .then(data => (data.results || []).map(r => ({ ...r, mediaType: 'tv', source: genreNames[genreId], section: 'genre', genreId: genreId, genreName: genreNames[genreId] })))
                     .catch(() => [])
-            );
-        }
+            ]).then(([movies, tv]) => [...movies, ...tv]);
+        });
 
-        // 7. Fetch all in parallel
-        const [recResults, simResults, discoverResults] = await Promise.all([
+        // 8. Fetch trending this week
+        const trendingPromise = Promise.all([
+            fetch(`${TMDB_BASE_URL}/trending/movie/week?api_key=${TMDB_API_KEY}&page=1`)
+                .then(r => r.json())
+                .then(data => (data.results || []).map(r => ({ ...r, mediaType: 'movie', source: 'Trending', section: 'trending' })))
+                .catch(() => []),
+            fetch(`${TMDB_BASE_URL}/trending/tv/week?api_key=${TMDB_API_KEY}&page=1`)
+                .then(r => r.json())
+                .then(data => (data.results || []).map(r => ({ ...r, mediaType: 'tv', source: 'Trending', section: 'trending' })))
+                .catch(() => [])
+        ]).then(([movies, tv]) => [...movies, ...tv]);
+
+        // 9. Fetch movies by favorite directors
+        const directorPromises = topDirectors.map(dir =>
+            fetch(`${TMDB_BASE_URL}/discover/movie?api_key=${TMDB_API_KEY}&sort_by=vote_average.desc&vote_count.gte=50&with_crew=${dir.id}&page=1`)
+                .then(r => r.json())
+                .then(data => (data.results || []).map(r => ({ ...r, mediaType: 'movie', source: dir.name, section: 'director', directorName: dir.name })))
+                .catch(() => [])
+        );
+
+        // 10. Fetch all in parallel
+        const [recResults, simResults, genreResults, trendingResults, directorResults] = await Promise.all([
             Promise.all(recPromises),
             Promise.all(simPromises),
-            Promise.all(discoverPromises)
+            Promise.all(genreDiscoverPromises),
+            trendingPromise,
+            Promise.all(directorPromises)
         ]);
 
-        // 8. Merge, deduplicate, and exclude already seen
+        // 11. Merge, deduplicate, and exclude already seen
         const allRecs = [];
         const seenRecIds = new Set();
 
         const addRecs = (items, priority) => {
-            items.forEach(batch => {
-                batch.forEach(item => {
-                    const key = `${item.mediaType}-${item.id}`;
+            const batch = Array.isArray(items[0]) ? items : [items];
+            batch.forEach(group => {
+                (Array.isArray(group) ? group : [group]).forEach(item => {
+                    const mt = item.mediaType || 'movie';
+                    const key = `${mt}-${item.id}`;
                     if (!seenRecIds.has(key) && !existingIds.has(key)) {
                         seenRecIds.add(key);
                         allRecs.push({ ...item, priority });
@@ -1805,13 +1880,17 @@ async function loadRecommendations() {
         };
 
         // Recommendations from top rated get highest priority
-        addRecs(recResults, 3);
-        // Similar movies get medium priority
-        addRecs(simResults, 2);
-        // Genre-based discover gets lower priority
-        addRecs(discoverResults, 1);
+        addRecs(recResults, 4);
+        // Similar movies get high priority
+        addRecs(simResults, 3);
+        // Director-based
+        addRecs(directorResults, 2);
+        // Genre-based discover
+        addRecs(genreResults, 2);
+        // Trending gets lower priority
+        addRecs([trendingResults], 1);
 
-        // 9. Sort: priority first, then by vote average
+        // 12. Sort: priority first, then by vote average
         allRecs.sort((a, b) => {
             if (b.priority !== a.priority) return b.priority - a.priority;
             return (b.vote_average || 0) - (a.vote_average || 0);
@@ -1820,7 +1899,7 @@ async function loadRecommendations() {
         // Cache for re-rendering without API calls
         cachedRecommendations = allRecs;
 
-        // 10. Build description
+        // 13. Build description
         const seedTitles = seedItems.slice(0, 3).map(s => s.title).join(', ');
         description.textContent = `Based on ${seedTitles}${seedItems.length > 3 ? ` and ${seedItems.length - 3} more` : ''} from your collection`;
 
@@ -1854,6 +1933,9 @@ function renderRecommendationsGrid() {
         recs = recs.filter(r => r.mediaType === typeFilter);
     }
 
+    // Also filter out hidden items
+    recs = recs.filter(item => !isItemHidden(item.id, item.mediaType || 'movie'));
+
     if (recs.length === 0) {
         container.innerHTML = `
             <div class="empty-state">
@@ -1864,44 +1946,103 @@ function renderRecommendationsGrid() {
         return;
     }
 
-    container.innerHTML = '';
-    recs.slice(0, 40).forEach(item => {
-        const mediaType = item.mediaType || 'movie';
-        const title = item.title || item.name;
-        const releaseDate = item.release_date || item.first_air_date;
-        const isInWatchlist = movies.watchlist.some(m => m.id === item.id && (m.mediaType || 'movie') === mediaType);
-        const isWatched = movies.watched.some(m => m.id === item.id && (m.mediaType || 'movie') === mediaType);
+    // Group into sections
+    const pickedForYou = recs.filter(r => r.section === 'pick').slice(0, 12);
+    const similarItems = recs.filter(r => r.section === 'similar').slice(0, 10);
+    const trendingItems = recs.filter(r => r.section === 'trending').slice(0, 10);
 
-        const card = document.createElement('div');
-        card.className = 'movie-card';
-        card.innerHTML = `
-            <img
-                src="${item.poster_path ? TMDB_IMAGE_BASE + item.poster_path : 'https://via.placeholder.com/500x750?text=No+Poster'}"
-                alt="${title}"
-                class="movie-poster"
-            />
-            <div class="movie-info">
-                <div class="movie-title">${title}</div>
-                <div class="movie-year">${releaseDate ? releaseDate.split('-')[0] : 'N/A'} ${mediaType === 'tv' ? '• TV' : ''}</div>
-                ${item.vote_average ? `<div style="margin: 5px 0; font-size: 13px; color: var(--text-secondary);">⭐ ${item.vote_average.toFixed(1)}/10</div>` : ''}
-                ${item.source ? `<div style="font-size: 11px; color: var(--accent); margin-bottom: 5px;">Because you liked: ${item.source}</div>` : ''}
-                <div class="movie-actions">
-                    ${!isInWatchlist && !isWatched ?
-                        `<button class="btn btn-primary btn-small" onclick="event.stopPropagation(); addToWatchlist(${item.id}, '${mediaType}')">+ Watchlist</button>` :
-                        ''}
-                    ${!isWatched ?
-                        `<button class="btn btn-secondary btn-small" onclick="event.stopPropagation(); addToWatched(${item.id}, '${mediaType}')">✓ Watched</button>` :
-                        '<span style="color: var(--success); font-size: 12px;">✓ In Collection</span>'}
-                </div>
-                <button class="btn btn-small streaming-btn" onclick="event.stopPropagation(); showStreamingInfo(${item.id}, '${mediaType}')" style="margin-top: 8px; width: 100%; background: var(--bg-secondary); border: 1px solid var(--border);">
-                    📺 Where to Watch
-                </button>
-            </div>
+    // Group genre items by genre name
+    const genreGroups = {};
+    recs.filter(r => r.section === 'genre').forEach(item => {
+        const name = item.genreName || item.source;
+        if (!genreGroups[name]) genreGroups[name] = [];
+        if (genreGroups[name].length < 8) genreGroups[name].push(item);
+    });
+
+    // Group director items by director name
+    const directorGroups = {};
+    recs.filter(r => r.section === 'director').forEach(item => {
+        const name = item.directorName || item.source;
+        if (!directorGroups[name]) directorGroups[name] = [];
+        if (directorGroups[name].length < 6) directorGroups[name].push(item);
+    });
+
+    container.innerHTML = '';
+
+    // Helper to create a section
+    const createSection = (title, subtitle, items) => {
+        if (items.length === 0) return;
+
+        const section = document.createElement('div');
+        section.style.cssText = 'margin-bottom: 35px;';
+        section.innerHTML = `
+            <h3 style="color: var(--text-primary); margin-bottom: 5px; font-size: 18px;">${title}</h3>
+            ${subtitle ? `<p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 15px;">${subtitle}</p>` : ''}
         `;
 
-        card.querySelector('.movie-poster').addEventListener('click', () => showMediaDetail(item.id, null, mediaType));
-        container.appendChild(card);
+        const grid = document.createElement('div');
+        grid.className = 'movie-grid';
+
+        items.forEach(item => {
+            const mediaType = item.mediaType || 'movie';
+            const itemTitle = item.title || item.name;
+            const releaseDate = item.release_date || item.first_air_date;
+            const isInWatchlist = movies.watchlist.some(m => m.id === item.id && (m.mediaType || 'movie') === mediaType);
+            const isWatched = movies.watched.some(m => m.id === item.id && (m.mediaType || 'movie') === mediaType);
+
+            const card = document.createElement('div');
+            card.className = 'movie-card';
+            card.innerHTML = `
+                <img
+                    src="${item.poster_path ? TMDB_IMAGE_BASE + item.poster_path : 'https://via.placeholder.com/500x750?text=No+Poster'}"
+                    alt="${itemTitle}"
+                    class="movie-poster"
+                />
+                <div class="movie-info">
+                    <div class="movie-title">${itemTitle}</div>
+                    <div class="movie-year">${releaseDate ? releaseDate.split('-')[0] : 'N/A'} ${mediaType === 'tv' ? '• TV' : ''}</div>
+                    ${item.vote_average ? `<div style="margin: 5px 0; font-size: 13px; color: var(--text-secondary);">⭐ ${item.vote_average.toFixed(1)}/10</div>` : ''}
+                    ${item.source && item.section === 'pick' ? `<div style="font-size: 11px; color: var(--accent); margin-bottom: 5px;">Because you liked: ${item.source}</div>` : ''}
+                    <div class="movie-actions">
+                        ${!isInWatchlist && !isWatched ?
+                            `<button class="btn btn-primary btn-small" onclick="event.stopPropagation(); addToWatchlist(${item.id}, '${mediaType}')">+ Watchlist</button>` :
+                            ''}
+                        ${!isWatched ?
+                            `<button class="btn btn-secondary btn-small" onclick="event.stopPropagation(); addToWatched(${item.id}, '${mediaType}')">✓ Watched</button>` :
+                            '<span style="color: var(--success); font-size: 12px;">✓ In Collection</span>'}
+                    </div>
+                    <button class="btn btn-small streaming-btn" onclick="event.stopPropagation(); showStreamingInfo(${item.id}, '${mediaType}')" style="margin-top: 8px; width: 100%; background: var(--bg-secondary); border: 1px solid var(--border);">
+                        📺 Where to Watch
+                    </button>
+                    <button class="btn btn-small" onclick="event.stopPropagation(); hideItem(${item.id}, '${mediaType}')" style="margin-top: 4px; width: 100%; background: transparent; border: 1px solid var(--border); color: var(--text-secondary); font-size: 11px;">
+                        🚫 Not Interested
+                    </button>
+                </div>
+            `;
+
+            card.querySelector('.movie-poster').addEventListener('click', () => showMediaDetail(item.id, null, mediaType));
+            grid.appendChild(card);
+        });
+
+        section.appendChild(grid);
+        container.appendChild(section);
+    };
+
+    // Render each section
+    createSection('Picked For You', 'Based on your highest-rated items', pickedForYou);
+    createSection('More Like Your Favorites', 'Similar to what you already love', similarItems);
+
+    // Director sections
+    Object.entries(directorGroups).forEach(([dirName, items]) => {
+        createSection(`From Director: ${dirName}`, null, items);
     });
+
+    // Genre sections
+    Object.entries(genreGroups).forEach(([genreName, items]) => {
+        createSection(`Because You Like ${genreName}`, `Top rated ${genreName.toLowerCase()} picks`, items);
+    });
+
+    createSection('Trending This Week', 'Popular right now', trendingItems);
 }
 
 // ============= Statistics =============
@@ -2039,6 +2180,45 @@ function loadTheme() {
 
     const icon = document.querySelector('.theme-icon');
     icon.textContent = savedTheme === 'dark' ? '☀️' : '🌙';
+}
+
+// ============= Collections Toggle =============
+
+function toggleCollections() {
+    const grid = document.getElementById('collections-grid');
+    const arrow = document.getElementById('collections-arrow');
+    if (!grid || !arrow) return;
+
+    const isHidden = grid.style.display === 'none';
+    grid.style.display = isHidden ? 'flex' : 'none';
+    arrow.style.transform = isHidden ? 'rotate(90deg)' : 'rotate(0deg)';
+}
+
+// ============= Hidden Items =============
+
+function getHiddenItems() {
+    const stored = localStorage.getItem('hiddenItems');
+    return stored ? JSON.parse(stored) : [];
+}
+
+function saveHiddenItems(items) {
+    localStorage.setItem('hiddenItems', JSON.stringify(items));
+}
+
+function hideItem(mediaId, mediaType = 'movie') {
+    const hidden = getHiddenItems();
+    const key = `${mediaType}-${mediaId}`;
+    if (!hidden.includes(key)) {
+        hidden.push(key);
+        saveHiddenItems(hidden);
+    }
+    showToast('Item hidden from your feed');
+    refreshCurrentView();
+}
+
+function isItemHidden(mediaId, mediaType = 'movie') {
+    const hidden = getHiddenItems();
+    return hidden.includes(`${mediaType}-${mediaId}`);
 }
 
 // ============= Toast Notifications =============

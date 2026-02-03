@@ -782,6 +782,11 @@ body {
     100% { transform: rotate(360deg); }
 }
 
+/* Collections Toggle */
+.collections-toggle:hover {
+    border-color: var(--accent) !important;
+}
+
 /* Responsive Design */
 @media (max-width: 768px) {
     .header {
