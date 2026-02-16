@@ -328,6 +328,60 @@ function filterAndRankCollections(collections, query, franchiseTerms = []) {
         .map(item => item.collection);
 }
 
+async function fetchKeywordIds(terms = []) {
+    if (!TMDB_API_KEY) return [];
+    const uniqueTerms = [...new Set(terms.map(term => term.trim()).filter(Boolean))];
+    if (uniqueTerms.length === 0) return [];
+
+    const keywordPromises = uniqueTerms.map(term =>
+        fetch(`${TMDB_BASE_URL}/search/keyword?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(term)}`)
+            .then(r => r.json())
+            .catch(() => null)
+    );
+
+    const keywordResults = await Promise.all(keywordPromises);
+    const keywordIds = [];
+    keywordResults.forEach(result => {
+        const keyword = result?.results?.[0];
+        if (keyword && !keywordIds.includes(keyword.id)) {
+            keywordIds.push(keyword.id);
+        }
+    });
+
+    return keywordIds;
+}
+
+async function fetchDiscoverByKeywords(keywordIds = [], mediaType = 'movie') {
+    if (!TMDB_API_KEY) return [];
+    if (keywordIds.length === 0) return [];
+
+    const keywordParam = keywordIds.slice(0, 3).join(',');
+    const discoverUrl = `${TMDB_BASE_URL}/discover/${mediaType}?api_key=${TMDB_API_KEY}&with_keywords=${keywordParam}&sort_by=popularity.desc&page=1`;
+
+    try {
+        const response = await fetch(discoverUrl);
+        const data = await response.json();
+        return data.results || [];
+    } catch (error) {
+        console.error('Error fetching discover by keywords:', error);
+        return [];
+    }
+}
+
+async function fetchCollectionParts(collectionId) {
+    if (!TMDB_API_KEY) return [];
+    if (!collectionId) return [];
+
+    try {
+        const response = await fetch(`${TMDB_BASE_URL}/collection/${collectionId}?api_key=${TMDB_API_KEY}`);
+        const data = await response.json();
+        return data?.parts || [];
+    } catch (error) {
+        console.error('Error fetching collection parts:', error);
+        return [];
+    }
+}
+
 async function searchMovies() {
     const query = document.getElementById('search-input').value.trim();
     const mediaTypeFilter = document.getElementById('media-type-filter').value;
@@ -467,8 +521,50 @@ async function searchMovies() {
             franchiseResults = franchiseResults.slice(0, 48);
         }
 
-        if (results.length > 0 || allCollections.length > 0 || franchiseResults.length > 0) {
-            renderSearchResults(results, mediaTypeFilter, query, allCollections, franchiseResults);
+        // Smart expansion for any query: keywords + collection parts (TMDB-only)
+        const smartResults = [];
+        const smartSeen = new Set(results.map(item => `${item.media_type}-${item.id}`));
+        franchiseResults.forEach(item => smartSeen.add(`${item.media_type}-${item.id}`));
+
+        const keywordTerms = [query, ...franchiseTerms].filter(Boolean).slice(0, 6);
+        const keywordIds = await fetchKeywordIds(keywordTerms);
+
+        const mediaTypesToDiscover = mediaTypeFilter === 'all' ? ['movie', 'tv'] : [mediaTypeFilter];
+        const discoverPromises = mediaTypesToDiscover.map(type => fetchDiscoverByKeywords(keywordIds, type));
+        const discoverResults = await Promise.all(discoverPromises);
+
+        discoverResults.forEach((items, idx) => {
+            const type = mediaTypesToDiscover[idx];
+            items.forEach(item => {
+                const key = `${type}-${item.id}`;
+                if (!smartSeen.has(key)) {
+                    smartSeen.add(key);
+                    smartResults.push({ ...item, media_type: type });
+                }
+            });
+        });
+
+        if (allCollections.length > 0) {
+            const collectionIds = allCollections.slice(0, 2).map(c => c.id);
+            const collectionParts = await Promise.all(collectionIds.map(fetchCollectionParts));
+            collectionParts.flat().forEach(item => {
+                const key = `movie-${item.id}`;
+                if (!smartSeen.has(key)) {
+                    smartSeen.add(key);
+                    smartResults.push({ ...item, media_type: 'movie' });
+                }
+            });
+        }
+
+        const allFranchiseResults = [...franchiseResults, ...smartResults]
+            .filter(item => item && item.id)
+            .sort((a, b) => (b.popularity || 0) - (a.popularity || 0))
+            .slice(0, 60);
+
+        const shouldShowFranchise = allFranchiseResults.length >= 4;
+
+        if (results.length > 0 || allCollections.length > 0 || shouldShowFranchise) {
+            renderSearchResults(results, mediaTypeFilter, query, allCollections, shouldShowFranchise ? allFranchiseResults : []);
         } else {
             resultsContainer.innerHTML = `
                 <div class="empty-state">
@@ -531,10 +627,10 @@ function renderSearchGrid(results, query, collections = [], franchiseResults = [
                         transition: transform 0.3s;
                         font-size: 14px;
                     ">&#9654;</span>
-                    <h3 style="margin: 0; color: var(--text-primary); font-size: 16px;">Franchise Matches (${franchiseResults.length})</h3>
+                    <h3 style="margin: 0; color: var(--text-primary); font-size: 16px;">Smart Franchise Group (${franchiseResults.length})</h3>
                 </div>
                 <div style="margin-top: 8px; color: var(--text-secondary); font-size: 12px;">
-                    Includes titles that aren’t always listed in TMDB collections.
+                    Uses TMDB keywords and collection parts to catch missing titles.
                 </div>
                 <div class="collections-grid" id="franchise-grid" style="display: none; gap: 15px; flex-wrap: wrap; margin-top: 15px;">
                     ${franchiseResults.map(item => {
