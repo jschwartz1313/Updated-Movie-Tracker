@@ -154,7 +154,8 @@ function refreshCurrentView() {
                     renderSearchGrid(
                         currentBrowseState.results,
                         currentBrowseState.query,
-                        currentBrowseState.collections || []
+                        currentBrowseState.collections || [],
+                        currentBrowseState.franchiseResults || []
                     );
                 } else if (currentBrowseState.mode === 'collection') {
                     // Re-load collection to refresh button states
@@ -371,6 +372,14 @@ async function searchMovies() {
             )
             : [];
 
+        // Franchise search: broaden search across related terms to build a "smart" franchise list
+        const MAX_FRANCHISE_TERMS = 8;
+        const franchiseSearchTerms = isFranchiseSearch ? franchiseTerms.slice(0, MAX_FRANCHISE_TERMS) : [];
+        const franchisePromises = franchiseSearchTerms.map(term =>
+            fetch(`${TMDB_BASE_URL}/search/multi?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(term)}&page=1`)
+                .then(r => r.json())
+        );
+
         // For movie/TV search, only search the original query (multiple pages for better coverage)
         const searchPromises = [];
         const pagesToFetch = isFranchiseSearch ? 3 : 2;
@@ -382,9 +391,10 @@ async function searchMovies() {
         }
 
         // Fetch all searches and collections in parallel
-        const [collectionResults, searchResults] = await Promise.all([
+        const [collectionResults, searchResults, franchiseSearchResults] = await Promise.all([
             Promise.all(collectionPromises),
-            Promise.all(searchPromises)
+            Promise.all(searchPromises),
+            Promise.all(franchisePromises)
         ]);
 
         // Merge all collection results and remove duplicates
@@ -432,8 +442,33 @@ async function searchMovies() {
         // Sort results by popularity for better ordering
         results.sort((a, b) => (b.popularity || 0) - (a.popularity || 0));
 
-        if (results.length > 0 || allCollections.length > 0) {
-            renderSearchResults(results, mediaTypeFilter, query, allCollections);
+        // Build franchise results (smart collection)
+        let franchiseResults = [];
+        if (isFranchiseSearch && franchiseSearchResults.length > 0) {
+            const franchiseSeen = new Set();
+            const mainResultKeys = new Set(results.map(item => `${item.media_type}-${item.id}`));
+
+            franchiseSearchResults.forEach(data => {
+                (data.results || []).forEach(item => {
+                    if (item.media_type === 'person') return;
+                    if (mediaTypeFilter === 'movie' && item.media_type !== 'movie') return;
+                    if (mediaTypeFilter === 'tv' && item.media_type !== 'tv') return;
+
+                    const key = `${item.media_type}-${item.id}`;
+                    if (mainResultKeys.has(key)) return;
+                    if (!franchiseSeen.has(key)) {
+                        franchiseSeen.add(key);
+                        franchiseResults.push(item);
+                    }
+                });
+            });
+
+            franchiseResults.sort((a, b) => (b.popularity || 0) - (a.popularity || 0));
+            franchiseResults = franchiseResults.slice(0, 48);
+        }
+
+        if (results.length > 0 || allCollections.length > 0 || franchiseResults.length > 0) {
+            renderSearchResults(results, mediaTypeFilter, query, allCollections, franchiseResults);
         } else {
             resultsContainer.innerHTML = `
                 <div class="empty-state">
@@ -454,7 +489,7 @@ async function searchMovies() {
     }
 }
 
-function renderSearchResults(results, mediaType = 'movie', query = '', collections = []) {
+function renderSearchResults(results, mediaType = 'movie', query = '', collections = [], franchiseResults = []) {
     // Store current state for re-rendering
     currentBrowseState = {
         mode: 'search',
@@ -462,18 +497,82 @@ function renderSearchResults(results, mediaType = 'movie', query = '', collectio
         mediaType: mediaType,
         query: query,
         year: null,
-        collections: collections
+        collections: collections,
+        franchiseResults: franchiseResults
     };
 
-    renderSearchGrid(results, query, collections);
+    renderSearchGrid(results, query, collections, franchiseResults);
 }
 
-function renderSearchGrid(results, query, collections = []) {
+function renderSearchGrid(results, query, collections = [], franchiseResults = []) {
     const container = document.getElementById('browse-results');
 
     let html = `<div style="margin-bottom: 20px; color: var(--text-secondary);">
         Search results for "${query}" - ${results.length} items found
     </div>`;
+
+    if (franchiseResults.length > 0) {
+        html += `
+            <div class="collections-section" style="margin-bottom: 30px;">
+                <div class="collections-toggle" onclick="toggleFranchiseResults()" style="
+                    cursor: pointer;
+                    display: flex;
+                    align-items: center;
+                    gap: 10px;
+                    padding: 12px 16px;
+                    background: var(--bg-card);
+                    border: 1px solid var(--border);
+                    border-radius: 10px;
+                    user-select: none;
+                    transition: all 0.2s;
+                ">
+                    <span class="collections-arrow" id="franchise-arrow" style="
+                        display: inline-block;
+                        transition: transform 0.3s;
+                        font-size: 14px;
+                    ">&#9654;</span>
+                    <h3 style="margin: 0; color: var(--text-primary); font-size: 16px;">Franchise Matches (${franchiseResults.length})</h3>
+                </div>
+                <div style="margin-top: 8px; color: var(--text-secondary); font-size: 12px;">
+                    Includes titles that aren’t always listed in TMDB collections.
+                </div>
+                <div class="collections-grid" id="franchise-grid" style="display: none; gap: 15px; flex-wrap: wrap; margin-top: 15px;">
+                    ${franchiseResults.map(item => {
+                        const title = item.title || item.name;
+                        const releaseDate = item.release_date || item.first_air_date;
+                        return `
+                            <div class="collection-card" onclick="showMediaDetail(${item.id}, null, '${item.media_type}')" style="
+                                cursor: pointer;
+                                background: var(--bg-card);
+                                border: 1px solid var(--border);
+                                border-radius: 12px;
+                                padding: 15px;
+                                display: flex;
+                                align-items: center;
+                                gap: 12px;
+                                transition: all 0.2s;
+                                min-width: 250px;
+                            ">
+                                ${item.poster_path ?
+                                    `<img src="${TMDB_IMAGE_BASE.replace('w500', 'w92')}${item.poster_path}"
+                                        alt="${title}"
+                                        style="width: 50px; height: 75px; object-fit: cover; border-radius: 6px;">` :
+                                    `<div style="width: 50px; height: 75px; background: var(--bg-secondary); border-radius: 6px; display: flex; align-items: center; justify-content: center;">🎬</div>`
+                                }
+                                <div>
+                                    <div style="font-weight: 600; color: var(--text-primary);">${title}</div>
+                                    <div style="font-size: 12px; color: var(--text-secondary);">
+                                        ${releaseDate ? releaseDate.split('-')[0] : 'N/A'} ${item.media_type === 'tv' ? '• TV' : ''}
+                                    </div>
+                                    <div style="font-size: 12px; color: var(--accent);">View details →</div>
+                                </div>
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+            </div>
+        `;
+    }
 
     // Show collections if any (collapsible, hidden by default)
     if (collections.length > 0) {
@@ -2330,6 +2429,16 @@ function loadTheme() {
 function toggleCollections() {
     const grid = document.getElementById('collections-grid');
     const arrow = document.getElementById('collections-arrow');
+    if (!grid || !arrow) return;
+
+    const isHidden = grid.style.display === 'none';
+    grid.style.display = isHidden ? 'flex' : 'none';
+    arrow.style.transform = isHidden ? 'rotate(90deg)' : 'rotate(0deg)';
+}
+
+function toggleFranchiseResults() {
+    const grid = document.getElementById('franchise-grid');
+    const arrow = document.getElementById('franchise-arrow');
     if (!grid || !arrow) return;
 
     const isHidden = grid.style.display === 'none';
