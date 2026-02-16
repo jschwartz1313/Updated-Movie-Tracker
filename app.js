@@ -356,12 +356,16 @@ async function fetchDiscoverByKeywords(keywordIds = [], mediaType = 'movie') {
     if (keywordIds.length === 0) return [];
 
     const keywordParam = keywordIds.slice(0, 3).join(',');
-    const discoverUrl = `${TMDB_BASE_URL}/discover/${mediaType}?api_key=${TMDB_API_KEY}&with_keywords=${keywordParam}&sort_by=popularity.desc&page=1`;
+    const results = [];
 
     try {
-        const response = await fetch(discoverUrl);
-        const data = await response.json();
-        return data.results || [];
+        for (let page = 1; page <= 2; page++) {
+            const discoverUrl = `${TMDB_BASE_URL}/discover/${mediaType}?api_key=${TMDB_API_KEY}&with_keywords=${keywordParam}&sort_by=popularity.desc&page=${page}`;
+            const response = await fetch(discoverUrl);
+            const data = await response.json();
+            results.push(...(data.results || []));
+        }
+        return results;
     } catch (error) {
         console.error('Error fetching discover by keywords:', error);
         return [];
@@ -380,6 +384,194 @@ async function fetchCollectionParts(collectionId) {
         console.error('Error fetching collection parts:', error);
         return [];
     }
+}
+
+async function fetchMediaSignalDetails(mediaId, mediaType = 'movie') {
+    if (!TMDB_API_KEY) return null;
+    if (!mediaId) return null;
+
+    try {
+        const response = await fetch(
+            `${TMDB_BASE_URL}/${mediaType}/${mediaId}?api_key=${TMDB_API_KEY}&append_to_response=keywords,recommendations,similar`
+        );
+        return await response.json();
+    } catch (error) {
+        console.error('Error fetching media signal details:', error);
+        return null;
+    }
+}
+
+function getMediaTitle(item) {
+    return item?.title || item?.name || '';
+}
+
+function getMediaType(item, fallback = 'movie') {
+    return item?.media_type || item?.mediaType || fallback;
+}
+
+function getKeywordIdsFromDetails(details, mediaType = 'movie') {
+    if (!details) return [];
+
+    // TMDB response shape differs for movie vs tv.
+    if (mediaType === 'movie') {
+        return (details.keywords?.keywords || []).map(k => k.id).filter(Boolean);
+    }
+    return (details.keywords?.results || []).map(k => k.id).filter(Boolean);
+}
+
+function matchesFranchiseTerms(item, terms = []) {
+    const titleNorm = normalizeSearchText(getMediaTitle(item));
+    if (!titleNorm) return false;
+
+    const normalizedTerms = terms
+        .map(term => normalizeSearchText(term))
+        .filter(Boolean);
+
+    if (normalizedTerms.some(term => titleNorm.includes(term))) return true;
+
+    const titleTokens = tokenizeSearchText(titleNorm);
+    return normalizedTerms.some(term => {
+        const termTokens = tokenizeSearchText(term);
+        if (termTokens.length < 2) return false;
+        const matches = termTokens.filter(token => titleTokens.includes(token)).length;
+        return matches >= Math.ceil(termTokens.length * 0.6);
+    });
+}
+
+function addSignalCandidate(candidateMap, item, mediaType, score, reason) {
+    if (!item || !item.id || item.media_type === 'person') return;
+    const key = `${mediaType}-${item.id}`;
+    if (!candidateMap.has(key)) {
+        candidateMap.set(key, {
+            item: { ...item, media_type: mediaType },
+            score: 0,
+            reasons: new Set()
+        });
+    }
+
+    const current = candidateMap.get(key);
+    current.score += score;
+    current.reasons.add(reason);
+    candidateMap.set(key, current);
+}
+
+function confidenceFromScore(score) {
+    if (score >= 85) return 'high';
+    if (score >= 50) return 'medium';
+    return 'low';
+}
+
+async function buildSmartFranchiseResults({
+    query,
+    mediaTypeFilter,
+    directResults = [],
+    franchiseSearchResults = [],
+    collections = [],
+    franchiseTerms = []
+}) {
+    const terms = [...new Set([query, ...franchiseTerms].map(t => t.trim()).filter(Boolean))];
+    const candidateMap = new Map();
+    const mediaTypesToUse = mediaTypeFilter === 'all' ? ['movie', 'tv'] : [mediaTypeFilter];
+
+    // 1) Strong seed: direct search results that match query/franchise terms.
+    directResults.forEach(item => {
+        const itemType = getMediaType(item, mediaTypeFilter);
+        if (!mediaTypesToUse.includes(itemType)) return;
+        if (!matchesFranchiseTerms(item, terms)) return;
+        addSignalCandidate(candidateMap, item, itemType, 50, 'Direct search match');
+    });
+
+    // 2) Expansion from known franchise terms.
+    franchiseSearchResults.forEach(data => {
+        (data.results || []).forEach(item => {
+            const itemType = getMediaType(item, mediaTypeFilter);
+            if (!mediaTypesToUse.includes(itemType)) return;
+            if (!matchesFranchiseTerms(item, terms)) return;
+            addSignalCandidate(candidateMap, item, itemType, 35, 'Franchise term search');
+        });
+    });
+
+    // 3) TMDB keyword expansion for the query and franchise synonyms.
+    const queryKeywordIds = await fetchKeywordIds(terms.slice(0, 8));
+    const keywordDiscoverResults = await Promise.all(
+        mediaTypesToUse.map(type => fetchDiscoverByKeywords(queryKeywordIds, type))
+    );
+    keywordDiscoverResults.forEach((items, idx) => {
+        const mediaType = mediaTypesToUse[idx];
+        items.forEach(item => {
+            if (!matchesFranchiseTerms(item, terms)) return;
+            addSignalCandidate(candidateMap, item, mediaType, 24, 'Keyword expansion');
+        });
+    });
+
+    // 4) Seed-item graph expansion using recommendations/similar and seed keywords.
+    const seedItems = directResults
+        .filter(item => mediaTypesToUse.includes(getMediaType(item, mediaTypeFilter)))
+        .filter(item => matchesFranchiseTerms(item, terms))
+        .slice(0, 6);
+
+    const seedDetailsList = await Promise.all(
+        seedItems.map(item => fetchMediaSignalDetails(item.id, getMediaType(item, mediaTypeFilter)))
+    );
+
+    const seedKeywordIds = new Set();
+    for (let i = 0; i < seedDetailsList.length; i++) {
+        const seed = seedItems[i];
+        const seedType = getMediaType(seed, mediaTypeFilter);
+        const details = seedDetailsList[i];
+        if (!details) continue;
+
+        getKeywordIdsFromDetails(details, seedType).forEach(id => seedKeywordIds.add(id));
+
+        (details.recommendations?.results || []).forEach(item => {
+            addSignalCandidate(candidateMap, item, seedType, 36, `Recommended from "${getMediaTitle(seed)}"`);
+        });
+
+        (details.similar?.results || []).forEach(item => {
+            addSignalCandidate(candidateMap, item, seedType, 30, `Similar to "${getMediaTitle(seed)}"`);
+        });
+
+        if (seedType === 'movie' && details.belongs_to_collection?.id) {
+            const parts = await fetchCollectionParts(details.belongs_to_collection.id);
+            parts.forEach(item => {
+                addSignalCandidate(candidateMap, item, 'movie', 32, `Collection part of "${getMediaTitle(seed)}"`);
+            });
+        }
+    }
+
+    if (seedKeywordIds.size > 0) {
+        const seededKeywordResults = await Promise.all(
+            mediaTypesToUse.map(type => fetchDiscoverByKeywords([...seedKeywordIds], type))
+        );
+        seededKeywordResults.forEach((items, idx) => {
+            const mediaType = mediaTypesToUse[idx];
+            items.forEach(item => {
+                addSignalCandidate(candidateMap, item, mediaType, 22, 'Seed keyword expansion');
+            });
+        });
+    }
+
+    // 5) Keep official collections as a weak fallback, not a primary source.
+    if (collections.length > 0) {
+        const parts = await Promise.all(collections.slice(0, 3).map(c => fetchCollectionParts(c.id)));
+        parts.flat().forEach(item => {
+            addSignalCandidate(candidateMap, item, 'movie', 18, 'Official TMDB collection');
+        });
+    }
+
+    return [...candidateMap.values()]
+        .map(candidate => ({
+            ...candidate.item,
+            _franchiseScore: candidate.score,
+            _franchiseConfidence: confidenceFromScore(candidate.score),
+            _franchiseReasons: [...candidate.reasons]
+        }))
+        .filter(item => item._franchiseConfidence !== 'low')
+        .sort((a, b) => {
+            if (b._franchiseScore !== a._franchiseScore) return b._franchiseScore - a._franchiseScore;
+            return (b.popularity || 0) - (a.popularity || 0);
+        })
+        .slice(0, 80);
 }
 
 async function searchMovies() {
@@ -496,72 +688,16 @@ async function searchMovies() {
         // Sort results by popularity for better ordering
         results.sort((a, b) => (b.popularity || 0) - (a.popularity || 0));
 
-        // Build franchise results (smart collection)
-        let franchiseResults = [];
-        if (isFranchiseSearch && franchiseSearchResults.length > 0) {
-            const franchiseSeen = new Set();
-            const mainResultKeys = new Set(results.map(item => `${item.media_type}-${item.id}`));
-
-            franchiseSearchResults.forEach(data => {
-                (data.results || []).forEach(item => {
-                    if (item.media_type === 'person') return;
-                    if (mediaTypeFilter === 'movie' && item.media_type !== 'movie') return;
-                    if (mediaTypeFilter === 'tv' && item.media_type !== 'tv') return;
-
-                    const key = `${item.media_type}-${item.id}`;
-                    if (mainResultKeys.has(key)) return;
-                    if (!franchiseSeen.has(key)) {
-                        franchiseSeen.add(key);
-                        franchiseResults.push(item);
-                    }
-                });
-            });
-
-            franchiseResults.sort((a, b) => (b.popularity || 0) - (a.popularity || 0));
-            franchiseResults = franchiseResults.slice(0, 48);
-        }
-
-        // Smart expansion for any query: keywords + collection parts (TMDB-only)
-        const smartResults = [];
-        const smartSeen = new Set(results.map(item => `${item.media_type}-${item.id}`));
-        franchiseResults.forEach(item => smartSeen.add(`${item.media_type}-${item.id}`));
-
-        const keywordTerms = [query, ...franchiseTerms].filter(Boolean).slice(0, 6);
-        const keywordIds = await fetchKeywordIds(keywordTerms);
-
-        const mediaTypesToDiscover = mediaTypeFilter === 'all' ? ['movie', 'tv'] : [mediaTypeFilter];
-        const discoverPromises = mediaTypesToDiscover.map(type => fetchDiscoverByKeywords(keywordIds, type));
-        const discoverResults = await Promise.all(discoverPromises);
-
-        discoverResults.forEach((items, idx) => {
-            const type = mediaTypesToDiscover[idx];
-            items.forEach(item => {
-                const key = `${type}-${item.id}`;
-                if (!smartSeen.has(key)) {
-                    smartSeen.add(key);
-                    smartResults.push({ ...item, media_type: type });
-                }
-            });
+        // Build confidence-ranked franchise group from multiple TMDB signals.
+        const allFranchiseResults = await buildSmartFranchiseResults({
+            query,
+            mediaTypeFilter,
+            directResults: results,
+            franchiseSearchResults,
+            collections: allCollections,
+            franchiseTerms
         });
-
-        if (allCollections.length > 0) {
-            const collectionIds = allCollections.slice(0, 2).map(c => c.id);
-            const collectionParts = await Promise.all(collectionIds.map(fetchCollectionParts));
-            collectionParts.flat().forEach(item => {
-                const key = `movie-${item.id}`;
-                if (!smartSeen.has(key)) {
-                    smartSeen.add(key);
-                    smartResults.push({ ...item, media_type: 'movie' });
-                }
-            });
-        }
-
-        const allFranchiseResults = [...franchiseResults, ...smartResults]
-            .filter(item => item && item.id)
-            .sort((a, b) => (b.popularity || 0) - (a.popularity || 0))
-            .slice(0, 60);
-
-        const shouldShowFranchise = allFranchiseResults.length >= 4;
+        const shouldShowFranchise = allFranchiseResults.length >= 3;
 
         if (results.length > 0 || allCollections.length > 0 || shouldShowFranchise) {
             renderSearchResults(results, mediaTypeFilter, query, allCollections, shouldShowFranchise ? allFranchiseResults : []);
@@ -630,12 +766,17 @@ function renderSearchGrid(results, query, collections = [], franchiseResults = [
                     <h3 style="margin: 0; color: var(--text-primary); font-size: 16px;">Smart Franchise Group (${franchiseResults.length})</h3>
                 </div>
                 <div style="margin-top: 8px; color: var(--text-secondary); font-size: 12px;">
-                    Uses TMDB keywords and collection parts to catch missing titles.
+                    Ranked by TMDB signals: direct match, keyword graph, recommendations, and similar titles.
                 </div>
                 <div class="collections-grid" id="franchise-grid" style="display: none; gap: 15px; flex-wrap: wrap; margin-top: 15px;">
-                    ${franchiseResults.map(item => {
+                    ${franchiseResults.filter(item => !isItemHidden(item.id, item.media_type || 'movie')).map(item => {
                         const title = item.title || item.name;
                         const releaseDate = item.release_date || item.first_air_date;
+                        const confidence = item._franchiseConfidence || 'medium';
+                        const confidenceColor = confidence === 'high' ? 'var(--success)' : 'var(--accent)';
+                        const confidenceLabel = confidence === 'high' ? 'High confidence' : 'Medium confidence';
+                        const reasonCount = (item._franchiseReasons || []).length;
+                        const reasonLabel = reasonCount === 1 ? '1 signal' : `${reasonCount} signals`;
                         return `
                             <div class="collection-card" onclick="showMediaDetail(${item.id}, null, '${item.media_type}')" style="
                                 cursor: pointer;
@@ -660,7 +801,8 @@ function renderSearchGrid(results, query, collections = [], franchiseResults = [
                                     <div style="font-size: 12px; color: var(--text-secondary);">
                                         ${releaseDate ? releaseDate.split('-')[0] : 'N/A'} ${item.media_type === 'tv' ? '• TV' : ''}
                                     </div>
-                                    <div style="font-size: 12px; color: var(--accent);">View details →</div>
+                                    <div style="font-size: 12px; color: ${confidenceColor};">${confidenceLabel}</div>
+                                    <div style="font-size: 11px; color: var(--text-secondary);">${reasonLabel}</div>
                                 </div>
                             </div>
                         `;
