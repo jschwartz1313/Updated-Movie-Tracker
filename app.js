@@ -246,6 +246,87 @@ const FRANCHISE_KEYWORDS = {
     'divergent': ['Divergent', 'Insurgent', 'Allegiant']
 };
 
+function normalizeSearchText(text) {
+    return (text || '')
+        .toLowerCase()
+        .replace(/&/g, 'and')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim();
+}
+
+function tokenizeSearchText(text) {
+    const normalized = normalizeSearchText(text);
+    return normalized ? normalized.split(' ').filter(Boolean) : [];
+}
+
+function escapeRegExp(text) {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function scoreCollectionMatch(collectionName, query, franchiseTerms = []) {
+    const nameNorm = normalizeSearchText(collectionName);
+    if (!nameNorm) return { score: 0, overlapRatio: 0, nameNorm };
+
+    const queryNorm = normalizeSearchText(query);
+    const queryTokens = tokenizeSearchText(query);
+    const termList = [query, ...franchiseTerms]
+        .map(term => normalizeSearchText(term))
+        .filter(Boolean);
+
+    const nameTokens = tokenizeSearchText(nameNorm);
+    const sharedTokens = queryTokens.filter(token => nameTokens.includes(token));
+    const overlapRatio = queryTokens.length > 0 ? sharedTokens.length / queryTokens.length : 0;
+
+    let score = 0;
+
+    if (termList.includes(nameNorm)) score += 100;
+    if (termList.some(term => nameNorm.startsWith(term))) score += 70;
+    if (termList.some(term => nameNorm.includes(term))) score += 40;
+
+    if (overlapRatio > 0) score += Math.round(overlapRatio * 40);
+
+    // Strong boost for exact word match on short queries
+    if (queryNorm && queryNorm.length <= 5) {
+        const wordMatch = new RegExp(`\\b${escapeRegExp(queryNorm)}\\b`).test(nameNorm);
+        if (wordMatch) score += 20;
+    }
+
+    return { score, overlapRatio, nameNorm };
+}
+
+function filterAndRankCollections(collections, query, franchiseTerms = []) {
+    const queryNorm = normalizeSearchText(query);
+    const queryTokens = tokenizeSearchText(query);
+    const termList = [query, ...franchiseTerms]
+        .map(term => normalizeSearchText(term))
+        .filter(Boolean);
+
+    if (!queryNorm || collections.length === 0) return [];
+
+    const scored = collections.map(collection => {
+        const { score, overlapRatio, nameNorm } = scoreCollectionMatch(collection.name, query, franchiseTerms);
+        return { collection, score, overlapRatio, nameNorm };
+    });
+
+    const filtered = scored.filter(item => {
+        const hasBasicMatch = termList.some(term => item.nameNorm.includes(term));
+        const hasOverlap = item.overlapRatio >= 0.5 && queryTokens.length >= 2;
+        const hasStrongScore = item.score >= 60;
+        const shortQuery = queryTokens.length === 1 && queryNorm.length <= 3;
+
+        if (shortQuery) {
+            const hasLongTermMatch = termList.some(term => term.length >= 4 && item.nameNorm.includes(term));
+            return (item.score >= 70 && hasBasicMatch) || (franchiseTerms.length > 0 && hasLongTermMatch);
+        }
+
+        return hasStrongScore || hasOverlap || hasBasicMatch;
+    });
+
+    return filtered
+        .sort((a, b) => b.score - a.score)
+        .map(item => item.collection);
+}
+
 async function searchMovies() {
     const query = document.getElementById('search-input').value.trim();
     const mediaTypeFilter = document.getElementById('media-type-filter').value;
@@ -278,14 +359,17 @@ async function searchMovies() {
         const franchiseTerms = FRANCHISE_KEYWORDS[queryLower] || [];
         const isFranchiseSearch = franchiseTerms.length > 0;
 
-        // Build collection search promises - use franchise terms for comprehensive collection finding
-        const collectionSearchTerms = [query, ...franchiseTerms];
+        // Build collection search promises - only for movies (TMDB collections are movie-only)
+        const shouldSearchCollections = mediaTypeFilter !== 'tv';
+        const collectionSearchTerms = shouldSearchCollections ? [query, ...franchiseTerms] : [];
         const uniqueCollectionTerms = [...new Set(collectionSearchTerms)];
 
-        const collectionPromises = uniqueCollectionTerms.map(term =>
-            fetch(`${TMDB_BASE_URL}/search/collection?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(term)}&page=1`)
-                .then(r => r.json())
-        );
+        const collectionPromises = shouldSearchCollections
+            ? uniqueCollectionTerms.map(term =>
+                fetch(`${TMDB_BASE_URL}/search/collection?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(term)}&page=1`)
+                    .then(r => r.json())
+            )
+            : [];
 
         // For movie/TV search, only search the original query (multiple pages for better coverage)
         const searchPromises = [];
@@ -304,16 +388,20 @@ async function searchMovies() {
         ]);
 
         // Merge all collection results and remove duplicates
-        const allCollections = [];
-        const seenCollectionIds = new Set();
-        collectionResults.forEach(data => {
-            (data.results || []).forEach(collection => {
-                if (!seenCollectionIds.has(collection.id)) {
-                    seenCollectionIds.add(collection.id);
-                    allCollections.push(collection);
-                }
+        let allCollections = [];
+        if (shouldSearchCollections) {
+            const seenCollectionIds = new Set();
+            collectionResults.forEach(data => {
+                (data.results || []).forEach(collection => {
+                    if (!seenCollectionIds.has(collection.id)) {
+                        seenCollectionIds.add(collection.id);
+                        allCollections.push(collection);
+                    }
+                });
             });
-        });
+
+            allCollections = filterAndRankCollections(allCollections, query, franchiseTerms).slice(0, 12);
+        }
 
         // Merge search results and remove duplicates
         const seenIds = new Set();
