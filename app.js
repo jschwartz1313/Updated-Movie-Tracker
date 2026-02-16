@@ -561,9 +561,12 @@ function renderSearchGrid(results, query, collections = []) {
                     ${!isInWatchlist && !isWatched ?
                         `<button class="btn btn-primary btn-small" onclick="event.stopPropagation(); addToWatchlist(${item.id}, '${mediaType}')">+ Watchlist</button>` :
                         ''}
+                    ${isInWatchlist ?
+                        `<button class="btn btn-danger btn-small" onclick="event.stopPropagation(); removeFromWatchlist(${item.id}, '${mediaType}')">− Watchlist</button>` :
+                        ''}
                     ${!isWatched ?
                         `<button class="btn btn-secondary btn-small" onclick="event.stopPropagation(); addToWatched(${item.id}, '${mediaType}')">✓ Watched</button>` :
-                        '<span style="color: var(--success); font-size: 12px;">✓ In Collection</span>'}
+                        `<button class="btn btn-danger btn-small" onclick="event.stopPropagation(); removeFromWatched(${item.id}, '${mediaType}')">✗ Unwatch</button>`}
                 </div>
                 <button class="btn btn-small streaming-btn" onclick="event.stopPropagation(); showStreamingInfo(${item.id}, '${mediaType}')" style="margin-top: 8px; width: 100%; background: var(--bg-secondary); border: 1px solid var(--border);">
                     📺 Where to Watch
@@ -625,9 +628,12 @@ function renderBrowseGrid(results, mediaType, query = null, year = null) {
                     ${!isInWatchlist && !isWatched ?
                         `<button class="btn btn-primary btn-small" onclick="event.stopPropagation(); addToWatchlist(${item.id}, '${mediaType}')">+ Watchlist</button>` :
                         ''}
+                    ${isInWatchlist ?
+                        `<button class="btn btn-danger btn-small" onclick="event.stopPropagation(); removeFromWatchlist(${item.id}, '${mediaType}')">− Watchlist</button>` :
+                        ''}
                     ${!isWatched ?
                         `<button class="btn btn-secondary btn-small" onclick="event.stopPropagation(); addToWatched(${item.id}, '${mediaType}')">✓ Watched</button>` :
-                        '<span style="color: var(--success); font-size: 12px;">✓ In Collection</span>'}
+                        `<button class="btn btn-danger btn-small" onclick="event.stopPropagation(); removeFromWatched(${item.id}, '${mediaType}')">✗ Unwatch</button>`}
                 </div>
                 <button class="btn btn-small streaming-btn" onclick="event.stopPropagation(); showStreamingInfo(${item.id}, '${mediaType}')" style="margin-top: 8px; width: 100%; background: var(--bg-secondary); border: 1px solid var(--border);">
                     📺 Where to Watch
@@ -842,9 +848,12 @@ async function loadCollection(collectionId) {
                             ${!isInWatchlist && !isWatched ?
                                 `<button class="btn btn-primary btn-small" onclick="event.stopPropagation(); addToWatchlist(${item.id}, 'movie')">+ Watchlist</button>` :
                                 ''}
+                            ${isInWatchlist ?
+                                `<button class="btn btn-danger btn-small" onclick="event.stopPropagation(); removeFromWatchlist(${item.id}, 'movie')">− Watchlist</button>` :
+                                ''}
                             ${!isWatched ?
                                 `<button class="btn btn-secondary btn-small" onclick="event.stopPropagation(); addToWatched(${item.id}, 'movie')">✓ Watched</button>` :
-                                '<span style="color: var(--success); font-size: 12px;">✓ In Collection</span>'}
+                                `<button class="btn btn-danger btn-small" onclick="event.stopPropagation(); removeFromWatched(${item.id}, 'movie')">✗ Unwatch</button>`}
                         </div>
                         <button class="btn btn-small streaming-btn" onclick="event.stopPropagation(); showStreamingInfo(${item.id}, 'movie')" style="margin-top: 8px; width: 100%; background: var(--bg-secondary); border: 1px solid var(--border);">
                             📺 Where to Watch
@@ -1230,6 +1239,32 @@ function moveToWatched(movieId, mediaType = 'movie') {
     showToast(`Marked "${movie.title}" as watched`);
 }
 
+function moveToWatchlist(movieId, mediaType = 'movie') {
+    // Move item from watched back to watchlist
+    const movie = movies.watched.find(m => m.id === movieId && (m.mediaType || 'movie') === mediaType);
+    if (!movie) {
+        console.log('Movie not found in watched:', movieId, mediaType);
+        return;
+    }
+
+    movies.watched = movies.watched.filter(m => !(m.id === movieId && (m.mediaType || 'movie') === mediaType));
+
+    // Remove watched-specific properties
+    delete movie.watchedDate;
+    delete movie.rating;
+    delete movie.review;
+
+    // Add watchlist property
+    movie.addedDate = new Date().toISOString();
+    movies.watchlist.push(movie);
+
+    saveMoviesToStorage();
+    updateCounts();
+    updateStats();
+    renderWatched();
+    showToast(`Moved "${movie.title}" back to watchlist`);
+}
+
 function removeFromWatchlist(movieId, mediaType = 'movie') {
     const movie = movies.watchlist.find(m => m.id === movieId && (m.mediaType || 'movie') === mediaType);
     if (!movie) return;
@@ -1574,6 +1609,7 @@ function createMovieCard(movie, listType) {
                     <button class="btn btn-danger btn-small" onclick="event.stopPropagation(); removeFromWatchlist(${movie.id}, '${mediaType}')">Remove</button>
                 ` : `
                     <button class="btn btn-primary btn-small" onclick="event.stopPropagation(); openRatingModal(${movie.id}, '${mediaType}')">Rate</button>
+                    <button class="btn btn-secondary btn-small" onclick="event.stopPropagation(); moveToWatchlist(${movie.id}, '${mediaType}')">→ Watchlist</button>
                     <button class="btn btn-danger btn-small" onclick="event.stopPropagation(); removeFromWatched(${movie.id}, '${mediaType}')">Remove</button>
                 `}
             </div>
@@ -1640,6 +1676,10 @@ function displayMovieModal(movie, listType) {
     const year = (movie.release_date || movie.first_air_date) ? (movie.release_date || movie.first_air_date).split('-')[0] : 'N/A';
     const runtime = movie.runtime ? `${movie.runtime} min` : 'N/A';
 
+    // Determine current status
+    const isInWatchlist = movies.watchlist.some(m => m.id === movie.id && (m.mediaType || 'movie') === mediaType);
+    const isWatched = movies.watched.some(m => m.id === movie.id && (m.mediaType || 'movie') === mediaType);
+
     // Build external links
     const tmdbLink = `https://www.themoviedb.org/${mediaType}/${movie.id}`;
     const imdbLink = movie.externalIds?.imdb_id ? `https://www.imdb.com/title/${movie.externalIds.imdb_id}` : null;
@@ -1705,8 +1745,20 @@ function displayMovieModal(movie, listType) {
                     </div>
                 ` : ''}
 
-                ${listType === 'watched' ? `
-                    <div>
+                <div class="modal-actions" style="margin-top: 15px; display: flex; gap: 10px; flex-wrap: wrap;">
+                    ${!isInWatchlist && !isWatched ?
+                        `<button class="btn btn-primary" onclick="addToWatchlist(${movie.id}, '${mediaType}'); closeModal();">+ Add to Watchlist</button>` :
+                        ''}
+                    ${isInWatchlist ?
+                        `<button class="btn btn-danger" onclick="removeFromWatchlist(${movie.id}, '${mediaType}'); closeModal();">− Remove from Watchlist</button>` :
+                        ''}
+                    ${!isWatched ?
+                        `<button class="btn btn-secondary" onclick="addToWatched(${movie.id}, '${mediaType}'); closeModal();">✓ Mark as Watched</button>` :
+                        `<button class="btn btn-danger" onclick="removeFromWatched(${movie.id}, '${mediaType}'); closeModal();">✗ Remove from Watched</button>`}
+                </div>
+
+                ${isWatched ? `
+                    <div style="margin-top: 15px;">
                         <strong>Your Rating:</strong>
                         <div class="star-rating" id="modal-rating">
                             ${[1,2,3,4,5,6,7,8,9,10].map(i =>
@@ -2095,9 +2147,12 @@ function renderRecommendationsGrid() {
                         ${!isInWatchlist && !isWatched ?
                             `<button class="btn btn-primary btn-small" onclick="event.stopPropagation(); addToWatchlist(${item.id}, '${mediaType}')">+ Watchlist</button>` :
                             ''}
+                        ${isInWatchlist ?
+                            `<button class="btn btn-danger btn-small" onclick="event.stopPropagation(); removeFromWatchlist(${item.id}, '${mediaType}')">− Watchlist</button>` :
+                            ''}
                         ${!isWatched ?
                             `<button class="btn btn-secondary btn-small" onclick="event.stopPropagation(); addToWatched(${item.id}, '${mediaType}')">✓ Watched</button>` :
-                            '<span style="color: var(--success); font-size: 12px;">✓ In Collection</span>'}
+                            `<button class="btn btn-danger btn-small" onclick="event.stopPropagation(); removeFromWatched(${item.id}, '${mediaType}')">✗ Unwatch</button>`}
                     </div>
                     <button class="btn btn-small streaming-btn" onclick="event.stopPropagation(); showStreamingInfo(${item.id}, '${mediaType}')" style="margin-top: 8px; width: 100%; background: var(--bg-secondary); border: 1px solid var(--border);">
                         📺 Where to Watch
