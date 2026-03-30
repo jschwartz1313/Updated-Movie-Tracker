@@ -50,7 +50,11 @@
                             <option value="">All Genres</option>
                         </select>
                         <select id="year-filter" class="genre-filter" style="display: none;">
-                            <option value="">Select Year</option>
+                            <option value="">Choose a year</option>
+                        </select>
+                        <select id="year-mode-filter" class="genre-filter" style="display: none;">
+                            <option value="best">Best Of Year</option>
+                            <option value="popular">Most Popular</option>
                         </select>
                     </div>
                 </div>
@@ -64,8 +68,8 @@
             <div class="list-container">
                 <div class="list-header">
                     <h2>My Watchlist</h2>
-                    <div class="search-box" style="margin: 15px 0;">
-                        <input type="text" id="watchlist-search" placeholder="Search your watchlist..." style="flex: 1;" />
+                    <div class="search-box list-search-box" style="margin: 15px 0;">
+                        <input type="text" id="watchlist-search" placeholder="Search your watchlist..." />
                     </div>
                     <div class="filters" style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
                         <select id="watchlist-type-filter" class="genre-filter">
@@ -94,8 +98,8 @@
             <div class="list-container">
                 <div class="list-header">
                     <h2>Watched</h2>
-                    <div class="search-box" style="margin: 15px 0;">
-                        <input type="text" id="watched-search" placeholder="Search your watched list..." style="flex: 1;" />
+                    <div class="search-box list-search-box" style="margin: 15px 0;">
+                        <input type="text" id="watched-search" placeholder="Search your watched list..." />
                     </div>
                     <div class="filters" style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
                         <select id="watched-type-filter" class="genre-filter">

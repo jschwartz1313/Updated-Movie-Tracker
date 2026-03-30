@@ -1,5 +1,5 @@
 // TMDB API Configuration
-const TMDB_API_KEY = 'd954579ffe639c8a36b86cb2849c2ed1'; // Get your free API key from https://www.themoviedb.org/settings/api
+const TMDB_API_KEY = ''; // Add your TMDB API key here before running search or browse features.
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p/w500';
 
@@ -19,7 +19,14 @@ let currentBrowseState = {
     results: [],
     mediaType: 'movie',
     query: '',
-    year: null
+    year: null,
+    yearMode: 'best',
+    genreId: '',
+    activeFilter: 'popular',
+    collections: [],
+    franchiseResults: [],
+    collectionId: null,
+    previousState: null
 };
 
 // Initialize App
@@ -34,10 +41,197 @@ document.addEventListener('DOMContentLoaded', () => {
     initializeBrowse();
 
     // Show API key reminder if not set
-    if (!TMDB_API_KEY) {
-        showToast('⚠️ Please add your TMDB API key in app.js to search for movies!');
+    if (!hasTMDBApiKey()) {
+        showToast('Add your TMDB API key in app.js to enable browse, search, and recommendations.');
     }
 });
+
+function hasTMDBApiKey() {
+    return typeof TMDB_API_KEY === 'string' && TMDB_API_KEY.trim().length > 0;
+}
+
+function renderTMDBSetupMessage(message) {
+    return `
+        <div class="empty-state">
+            <div class="empty-state-icon">🔑</div>
+            <div class="empty-state-text">
+                ${message}<br><br>
+                Add your TMDB API key to the <code>TMDB_API_KEY</code> constant in <code>app.js</code>, then reload the page.
+            </div>
+        </div>
+    `;
+}
+
+function cloneBrowseState(state = currentBrowseState) {
+    return {
+        mode: state.mode || 'browse',
+        results: Array.isArray(state.results) ? [...state.results] : [],
+        mediaType: state.mediaType || 'movie',
+        query: state.query || '',
+        year: state.year || null,
+        yearMode: state.yearMode || 'best',
+        genreId: state.genreId || '',
+        activeFilter: state.activeFilter || 'popular',
+        collections: Array.isArray(state.collections) ? [...state.collections] : [],
+        franchiseResults: Array.isArray(state.franchiseResults) ? [...state.franchiseResults] : [],
+        collectionId: state.collectionId || null,
+        previousState: state.previousState ? cloneBrowseState(state.previousState) : null
+    };
+}
+
+function restoreBrowseState(state = currentBrowseState) {
+    if (!state || !Array.isArray(state.results) || state.results.length === 0) {
+        initializeBrowse();
+        return;
+    }
+
+    currentBrowseState = cloneBrowseState(state);
+
+    if (state.mode === 'search') {
+        renderSearchGrid(
+            state.results,
+            state.query,
+            state.collections || [],
+            state.franchiseResults || []
+        );
+        return;
+    }
+
+    if (state.mode === 'collection') {
+        renderCollectionResults(state);
+        return;
+    }
+
+    renderBrowseGrid(
+        state.results,
+        state.mediaType,
+        state.query,
+        state.year
+    );
+}
+
+function syncBrowseControlsFromState(state = currentBrowseState) {
+    const mediaTypeFilter = document.getElementById('media-type-filter');
+    const genreFilter = document.getElementById('genre-filter');
+    const yearFilter = document.getElementById('year-filter');
+    const yearModeFilter = document.getElementById('year-mode-filter');
+    if (mediaTypeFilter && state.mediaType) {
+        mediaTypeFilter.value = state.mediaType;
+    }
+    if (genreFilter) {
+        genreFilter.value = state.genreId || '';
+    }
+    if (yearFilter) {
+        yearFilter.value = state.year || '';
+        yearFilter.style.display = state.activeFilter === 'by_year' ? 'block' : 'none';
+    }
+    if (yearModeFilter) {
+        yearModeFilter.value = state.yearMode || 'best';
+        yearModeFilter.style.display = state.activeFilter === 'by_year' ? 'block' : 'none';
+    }
+    document.querySelectorAll('.filter-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.filter === (state.activeFilter || 'popular'));
+    });
+}
+
+function getReleaseDateForMedia(item, mediaType = 'movie') {
+    return mediaType === 'tv' ? item.first_air_date : item.release_date;
+}
+
+function calculateTrendingScore(item, windowName, mediaType = 'movie') {
+    const voteCount = item.vote_count || 0;
+    const voteAverage = item.vote_average || 0;
+    const popularity = item.popularity || 0;
+    const releaseDate = getReleaseDateForMedia(item, mediaType);
+
+    let recencyBonus = 0;
+    if (releaseDate) {
+        const daysSinceRelease = Math.round((Date.now() - new Date(releaseDate).getTime()) / (1000 * 60 * 60 * 24));
+        if (!Number.isNaN(daysSinceRelease)) {
+            if (daysSinceRelease <= 14) recencyBonus = 18;
+            else if (daysSinceRelease <= 45) recencyBonus = 12;
+            else if (daysSinceRelease <= 120) recencyBonus = 6;
+        }
+    }
+
+    const windowWeight = windowName === 'day' ? 26 : 16;
+    const qualityScore = voteCount > 0 ? Math.min(voteAverage, 10) * 2.5 : 0;
+    const confidenceScore = Math.min(Math.log10(voteCount + 1) * 8, 26);
+    const popularityScore = Math.min(Math.log10(popularity + 1) * 12, 28);
+
+    return windowWeight + qualityScore + confidenceScore + popularityScore + recencyBonus;
+}
+
+function calculateYearRankingScore(item, mediaType = 'movie', mode = 'best') {
+    const voteAverage = item.vote_average || 0;
+    const voteCount = item.vote_count || 0;
+    const popularity = item.popularity || 0;
+
+    if (mode === 'popular') {
+        return (popularity * 1.2) + Math.min(Math.log10(voteCount + 1) * 18, 40) + voteAverage;
+    }
+
+    const qualityScore = voteAverage * 9;
+    const confidenceScore = Math.min(Math.log10(voteCount + 1) * 18, 44);
+    const popularityScore = Math.min(Math.log10(popularity + 1) * 10, 22);
+    const releaseDate = getReleaseDateForMedia(item, mediaType);
+    const freshnessBonus = releaseDate && releaseDate.startsWith(String(new Date().getFullYear())) ? 2 : 0;
+
+    return qualityScore + confidenceScore + popularityScore + freshnessBonus;
+}
+
+async function fetchTrendingResults(mediaType, { genreId = '', pageLimit = 2 } = {}) {
+    const windowConfigs = [
+        { name: 'day', weight: 'day' },
+        { name: 'week', weight: 'week' }
+    ];
+
+    const requests = [];
+    windowConfigs.forEach(windowConfig => {
+        for (let page = 1; page <= pageLimit; page++) {
+            requests.push(
+                fetch(`${TMDB_BASE_URL}/trending/${mediaType}/${windowConfig.name}?api_key=${TMDB_API_KEY}&page=${page}`)
+                    .then(r => r.json())
+                    .then(data => ({ items: data.results || [], windowName: windowConfig.weight }))
+                    .catch(() => ({ items: [], windowName: windowConfig.weight }))
+            );
+        }
+    });
+
+    const responses = await Promise.all(requests);
+    const rankedMap = new Map();
+
+    responses.forEach(({ items, windowName }) => {
+        items.forEach(item => {
+            if (genreId && (!item.genre_ids || !item.genre_ids.includes(parseInt(genreId, 10)))) {
+                return;
+            }
+
+            const key = `${mediaType}-${item.id}`;
+            const nextScore = calculateTrendingScore(item, windowName, mediaType);
+            const existing = rankedMap.get(key);
+
+            if (!existing || nextScore > existing.trendingScore) {
+                rankedMap.set(key, {
+                    ...item,
+                    mediaType,
+                    trendingWindow: windowName,
+                    trendingScore: nextScore
+                });
+            }
+        });
+    });
+
+    return [...rankedMap.values()].sort((a, b) => {
+        if ((b.trendingScore || 0) !== (a.trendingScore || 0)) {
+            return (b.trendingScore || 0) - (a.trendingScore || 0);
+        }
+        if ((b.popularity || 0) !== (a.popularity || 0)) {
+            return (b.popularity || 0) - (a.popularity || 0);
+        }
+        return (b.vote_count || 0) - (a.vote_count || 0);
+    });
+}
 
 // ============= Event Listeners =============
 
@@ -82,10 +276,13 @@ function initializeEventListeners() {
 
             // Show/hide year filter
             const yearFilter = document.getElementById('year-filter');
+            const yearModeFilter = document.getElementById('year-mode-filter');
             if (btn.dataset.filter === 'by_year') {
                 yearFilter.style.display = 'block';
+                yearModeFilter.style.display = 'block';
             } else {
                 yearFilter.style.display = 'none';
+                yearModeFilter.style.display = 'none';
             }
 
             loadBrowseMovies(btn.dataset.filter);
@@ -93,6 +290,7 @@ function initializeEventListeners() {
     });
     document.getElementById('genre-filter').addEventListener('change', () => loadBrowseMovies());
     document.getElementById('year-filter').addEventListener('change', () => loadBrowseMovies());
+    document.getElementById('year-mode-filter').addEventListener('change', () => loadBrowseMovies('by_year'));
     document.getElementById('media-type-filter').addEventListener('change', async () => {
         await updateGenresForMediaType();
         loadBrowseMovies();
@@ -124,7 +322,12 @@ function switchView(viewName) {
     // Render appropriate content
     switch(viewName) {
         case 'browse':
-            initializeBrowse();
+            if (currentBrowseState.results.length > 0) {
+                syncBrowseControlsFromState();
+                restoreBrowseState();
+            } else {
+                initializeBrowse();
+            }
             break;
         case 'watchlist':
             renderWatchlist();
@@ -148,26 +351,8 @@ function refreshCurrentView() {
     const currentView = activeNav.dataset.view;
     switch(currentView) {
         case 'browse':
-            // Re-render from stored state (no API call needed)
             if (currentBrowseState.results.length > 0) {
-                if (currentBrowseState.mode === 'search') {
-                    renderSearchGrid(
-                        currentBrowseState.results,
-                        currentBrowseState.query,
-                        currentBrowseState.collections || [],
-                        currentBrowseState.franchiseResults || []
-                    );
-                } else if (currentBrowseState.mode === 'collection') {
-                    // Re-load collection to refresh button states
-                    loadCollection(currentBrowseState.collectionId);
-                } else {
-                    renderBrowseGrid(
-                        currentBrowseState.results,
-                        currentBrowseState.mediaType,
-                        currentBrowseState.query,
-                        currentBrowseState.year
-                    );
-                }
+                restoreBrowseState();
             }
             break;
         case 'watchlist':
@@ -191,8 +376,8 @@ function refreshCurrentView() {
 const FRANCHISE_KEYWORDS = {
     'marvel': ['Avengers', 'Iron Man', 'Thor', 'Captain America', 'Spider-Man', 'Guardians of the Galaxy', 'Black Panther', 'Ant-Man', 'Doctor Strange', 'X-Men', 'Deadpool', 'Hulk', 'Black Widow', 'Hawkeye', 'Loki', 'Eternals', 'Shang-Chi'],
     'mcu': ['Avengers', 'Iron Man', 'Thor', 'Captain America', 'Spider-Man', 'Guardians of the Galaxy', 'Black Panther', 'Ant-Man', 'Doctor Strange', 'Eternals', 'Shang-Chi'],
-    'star wars': ['Star Wars', 'Mandalorian', 'Obi-Wan', 'Boba Fett', 'Andor', 'Ahsoka', 'Clone Wars', 'Bad Batch', 'Rogue One', 'Solo'],
-    'starwars': ['Star Wars', 'Mandalorian', 'Obi-Wan', 'Boba Fett', 'Andor', 'Ahsoka', 'Clone Wars', 'Bad Batch'],
+    'star wars': ['Star Wars', 'The Mandalorian', 'Obi-Wan Kenobi', 'The Book of Boba Fett', 'Andor', 'Ahsoka', 'The Clone Wars', 'The Bad Batch', 'Rogue One', 'Solo: A Star Wars Story'],
+    'starwars': ['Star Wars', 'The Mandalorian', 'Obi-Wan Kenobi', 'The Book of Boba Fett', 'Andor', 'Ahsoka', 'The Clone Wars', 'The Bad Batch'],
     'dc': ['Batman', 'Superman', 'Wonder Woman', 'Justice League', 'Aquaman', 'The Flash', 'Suicide Squad', 'Shazam', 'Black Adam', 'Joker', 'Harley Quinn', 'Peacemaker'],
     'dceu': ['Batman', 'Superman', 'Wonder Woman', 'Justice League', 'Aquaman', 'Shazam', 'Black Adam'],
     'pixar': ['Toy Story', 'Finding Nemo', 'Finding Dory', 'The Incredibles', 'Cars', 'Monsters, Inc', 'Monsters University', 'Up', 'Wall-E', 'Coco', 'Inside Out', 'Soul', 'Luca', 'Turning Red', 'Elemental', 'Ratatouille', 'Brave'],
@@ -245,6 +430,53 @@ const FRANCHISE_KEYWORDS = {
     'twilight': ['Twilight', 'Breaking Dawn', 'New Moon', 'Eclipse'],
     'maze runner': ['Maze Runner'],
     'divergent': ['Divergent', 'Insurgent', 'Allegiant']
+};
+
+const AMBIGUOUS_FRANCHISE_TERMS = new Set([
+    'solo',
+    'avatar',
+    'alien',
+    'bond',
+    'pirates',
+    'rocky',
+    'creed',
+    'matrix',
+    'predator',
+    'halloween',
+    'saw',
+    'purge',
+    'scream',
+    'dc',
+    'mcu'
+]);
+
+const FRANCHISE_RULES = {
+    'star wars': {
+        aliases: [
+            'star wars',
+            'rogue one',
+            'solo a star wars story',
+            'the mandalorian',
+            'obi wan kenobi',
+            'the book of boba fett',
+            'andor',
+            'ahsoka',
+            'the clone wars',
+            'the bad batch',
+            'rebels',
+            'visions',
+            'skeleton crew'
+        ],
+        excludedTitlePatterns: [
+            /^phineas and ferb /,
+            /^lego /,
+            /^robot chicken /,
+            /^family guy /,
+            /^disney gallery /
+        ],
+        minSignalCategories: 2,
+        minimumScore: 75
+    }
 };
 
 function normalizeSearchText(text) {
@@ -329,7 +561,7 @@ function filterAndRankCollections(collections, query, franchiseTerms = []) {
 }
 
 async function fetchKeywordIds(terms = []) {
-    if (!TMDB_API_KEY) return [];
+    if (!hasTMDBApiKey()) return [];
     const uniqueTerms = [...new Set(terms.map(term => term.trim()).filter(Boolean))];
     if (uniqueTerms.length === 0) return [];
 
@@ -352,7 +584,7 @@ async function fetchKeywordIds(terms = []) {
 }
 
 async function fetchDiscoverByKeywords(keywordIds = [], mediaType = 'movie') {
-    if (!TMDB_API_KEY) return [];
+    if (!hasTMDBApiKey()) return [];
     if (keywordIds.length === 0) return [];
 
     const keywordParam = keywordIds.slice(0, 3).join(',');
@@ -373,7 +605,7 @@ async function fetchDiscoverByKeywords(keywordIds = [], mediaType = 'movie') {
 }
 
 async function fetchCollectionParts(collectionId) {
-    if (!TMDB_API_KEY) return [];
+    if (!hasTMDBApiKey()) return [];
     if (!collectionId) return [];
 
     try {
@@ -387,7 +619,7 @@ async function fetchCollectionParts(collectionId) {
 }
 
 async function fetchMediaSignalDetails(mediaId, mediaType = 'movie') {
-    if (!TMDB_API_KEY) return null;
+    if (!hasTMDBApiKey()) return null;
     if (!mediaId) return null;
 
     try {
@@ -438,26 +670,99 @@ function matchesFranchiseTerms(item, terms = []) {
     });
 }
 
-function addSignalCandidate(candidateMap, item, mediaType, score, reason) {
+function getDistinctiveFranchiseTerms(query, franchiseTerms = []) {
+    return [...new Set([query, ...franchiseTerms]
+        .map(term => normalizeSearchText(term))
+        .filter(Boolean)
+        .filter(term => {
+            const tokens = tokenizeSearchText(term);
+            if (tokens.length >= 2) return true;
+            if (term.length < 5) return false;
+            return !AMBIGUOUS_FRANCHISE_TERMS.has(term);
+        }))];
+}
+
+function getFranchiseDefinition(query, franchiseTerms = []) {
+    const normalizedQuery = normalizeSearchText(query);
+    const rule = FRANCHISE_RULES[normalizedQuery];
+    const aliases = rule?.aliases?.length
+        ? [...new Set(rule.aliases.map(alias => normalizeSearchText(alias)).filter(Boolean))]
+        : getDistinctiveFranchiseTerms('', franchiseTerms);
+
+    return {
+        query: normalizedQuery,
+        aliases,
+        excludedTitlePatterns: rule?.excludedTitlePatterns || [],
+        minSignalCategories: rule?.minSignalCategories || 2,
+        minimumScore: rule?.minimumScore || 80
+    };
+}
+
+function isExcludedFromFranchise(item, definition) {
+    const titleNorm = normalizeSearchText(getMediaTitle(item));
+    return definition.excludedTitlePatterns.some(pattern => pattern.test(titleNorm));
+}
+
+function matchesDistinctiveFranchiseTerms(item, query, franchiseTerms = []) {
+    const titleNorm = normalizeSearchText(getMediaTitle(item));
+    if (!titleNorm) return false;
+
+    const definition = getFranchiseDefinition(query, franchiseTerms);
+    if (isExcludedFromFranchise(item, definition)) return false;
+
+    const titleTokens = tokenizeSearchText(titleNorm);
+    const queryTerm = definition.query;
+    const distinctiveFranchiseTerms = definition.aliases;
+
+    const queryMatches = (() => {
+        if (!queryTerm) return false;
+        const queryTokens = tokenizeSearchText(queryTerm);
+        if (queryTokens.length === 0) return false;
+
+        if (queryTokens.length >= 2) {
+            return titleNorm.startsWith(queryTerm);
+        }
+
+        return titleTokens.includes(queryTerm);
+    })();
+
+    const synonymMatches = distinctiveFranchiseTerms.some(term => {
+        const termTokens = tokenizeSearchText(term);
+        if (titleNorm.includes(term)) return true;
+
+        if (termTokens.length === 1) {
+            return titleTokens.includes(term);
+        }
+
+        const overlap = termTokens.filter(token => titleTokens.includes(token)).length;
+        return overlap >= Math.ceil(termTokens.length * 0.75);
+    });
+
+    return queryMatches || synonymMatches;
+}
+
+function addSignalCandidate(candidateMap, item, mediaType, score, reason, category = 'other') {
     if (!item || !item.id || item.media_type === 'person') return;
     const key = `${mediaType}-${item.id}`;
     if (!candidateMap.has(key)) {
         candidateMap.set(key, {
             item: { ...item, media_type: mediaType },
             score: 0,
-            reasons: new Set()
+            reasons: new Set(),
+            categories: new Set()
         });
     }
 
     const current = candidateMap.get(key);
     current.score += score;
     current.reasons.add(reason);
+    current.categories.add(category);
     candidateMap.set(key, current);
 }
 
 function confidenceFromScore(score) {
-    if (score >= 85) return 'high';
-    if (score >= 50) return 'medium';
+    if (score >= 95) return 'high';
+    if (score >= 60) return 'medium';
     return 'low';
 }
 
@@ -470,6 +775,7 @@ async function buildSmartFranchiseResults({
     franchiseTerms = []
 }) {
     const terms = [...new Set([query, ...franchiseTerms].map(t => t.trim()).filter(Boolean))];
+    const definition = getFranchiseDefinition(query, franchiseTerms);
     const candidateMap = new Map();
     const mediaTypesToUse = mediaTypeFilter === 'all' ? ['movie', 'tv'] : [mediaTypeFilter];
 
@@ -477,8 +783,8 @@ async function buildSmartFranchiseResults({
     directResults.forEach(item => {
         const itemType = getMediaType(item, mediaTypeFilter);
         if (!mediaTypesToUse.includes(itemType)) return;
-        if (!matchesFranchiseTerms(item, terms)) return;
-        addSignalCandidate(candidateMap, item, itemType, 50, 'Direct search match');
+        if (!matchesDistinctiveFranchiseTerms(item, query, franchiseTerms)) return;
+        addSignalCandidate(candidateMap, item, itemType, 55, 'Direct search match', 'direct');
     });
 
     // 2) Expansion from known franchise terms.
@@ -486,8 +792,8 @@ async function buildSmartFranchiseResults({
         (data.results || []).forEach(item => {
             const itemType = getMediaType(item, mediaTypeFilter);
             if (!mediaTypesToUse.includes(itemType)) return;
-            if (!matchesFranchiseTerms(item, terms)) return;
-            addSignalCandidate(candidateMap, item, itemType, 35, 'Franchise term search');
+            if (!matchesDistinctiveFranchiseTerms(item, query, franchiseTerms)) return;
+            addSignalCandidate(candidateMap, item, itemType, 30, 'Franchise term search', 'term');
         });
     });
 
@@ -499,15 +805,15 @@ async function buildSmartFranchiseResults({
     keywordDiscoverResults.forEach((items, idx) => {
         const mediaType = mediaTypesToUse[idx];
         items.forEach(item => {
-            if (!matchesFranchiseTerms(item, terms)) return;
-            addSignalCandidate(candidateMap, item, mediaType, 24, 'Keyword expansion');
+            if (!matchesDistinctiveFranchiseTerms(item, query, franchiseTerms)) return;
+            addSignalCandidate(candidateMap, item, mediaType, 18, 'Keyword expansion', 'keyword');
         });
     });
 
     // 4) Seed-item graph expansion using recommendations/similar and seed keywords.
     const seedItems = directResults
         .filter(item => mediaTypesToUse.includes(getMediaType(item, mediaTypeFilter)))
-        .filter(item => matchesFranchiseTerms(item, terms))
+        .filter(item => matchesDistinctiveFranchiseTerms(item, query, franchiseTerms))
         .slice(0, 6);
 
     const seedDetailsList = await Promise.all(
@@ -524,17 +830,20 @@ async function buildSmartFranchiseResults({
         getKeywordIdsFromDetails(details, seedType).forEach(id => seedKeywordIds.add(id));
 
         (details.recommendations?.results || []).forEach(item => {
-            addSignalCandidate(candidateMap, item, seedType, 36, `Recommended from "${getMediaTitle(seed)}"`);
+            if (!matchesDistinctiveFranchiseTerms(item, query, franchiseTerms)) return;
+            addSignalCandidate(candidateMap, item, seedType, 22, `Recommended from "${getMediaTitle(seed)}"`, 'graph');
         });
 
         (details.similar?.results || []).forEach(item => {
-            addSignalCandidate(candidateMap, item, seedType, 30, `Similar to "${getMediaTitle(seed)}"`);
+            if (!matchesDistinctiveFranchiseTerms(item, query, franchiseTerms)) return;
+            addSignalCandidate(candidateMap, item, seedType, 18, `Similar to "${getMediaTitle(seed)}"`, 'graph');
         });
 
         if (seedType === 'movie' && details.belongs_to_collection?.id) {
             const parts = await fetchCollectionParts(details.belongs_to_collection.id);
             parts.forEach(item => {
-                addSignalCandidate(candidateMap, item, 'movie', 32, `Collection part of "${getMediaTitle(seed)}"`);
+                if (!matchesDistinctiveFranchiseTerms(item, query, franchiseTerms)) return;
+                addSignalCandidate(candidateMap, item, 'movie', 42, `Collection part of "${getMediaTitle(seed)}"`, 'collection');
             });
         }
     }
@@ -546,7 +855,8 @@ async function buildSmartFranchiseResults({
         seededKeywordResults.forEach((items, idx) => {
             const mediaType = mediaTypesToUse[idx];
             items.forEach(item => {
-                addSignalCandidate(candidateMap, item, mediaType, 22, 'Seed keyword expansion');
+                if (!matchesDistinctiveFranchiseTerms(item, query, franchiseTerms)) return;
+                addSignalCandidate(candidateMap, item, mediaType, 14, 'Seed keyword expansion', 'keyword');
             });
         });
     }
@@ -555,7 +865,8 @@ async function buildSmartFranchiseResults({
     if (collections.length > 0) {
         const parts = await Promise.all(collections.slice(0, 3).map(c => fetchCollectionParts(c.id)));
         parts.flat().forEach(item => {
-            addSignalCandidate(candidateMap, item, 'movie', 18, 'Official TMDB collection');
+            if (!matchesDistinctiveFranchiseTerms(item, query, franchiseTerms)) return;
+            addSignalCandidate(candidateMap, item, 'movie', 34, 'Official TMDB collection', 'collection');
         });
     }
 
@@ -564,14 +875,29 @@ async function buildSmartFranchiseResults({
             ...candidate.item,
             _franchiseScore: candidate.score,
             _franchiseConfidence: confidenceFromScore(candidate.score),
-            _franchiseReasons: [...candidate.reasons]
+            _franchiseReasons: [...candidate.reasons],
+            _franchiseSignalCount: candidate.categories.size,
+            _franchiseCategories: [...candidate.categories]
         }))
-        .filter(item => item._franchiseConfidence !== 'low')
+        .filter(item => {
+            const hasStrongTitleMatch = matchesDistinctiveFranchiseTerms(item, query, franchiseTerms);
+            const categories = new Set(item._franchiseCategories || []);
+            const hasCollectionEvidence = categories.has('collection');
+            const hasDirectEvidence = categories.has('direct');
+            const hasEnoughSignals = (item._franchiseSignalCount || 0) >= definition.minSignalCategories;
+            const isStrongEnough = item._franchiseScore >= definition.minimumScore;
+
+            return hasStrongTitleMatch && (
+                hasCollectionEvidence ||
+                hasDirectEvidence ||
+                (hasEnoughSignals && isStrongEnough)
+            );
+        })
         .sort((a, b) => {
             if (b._franchiseScore !== a._franchiseScore) return b._franchiseScore - a._franchiseScore;
             return (b.popularity || 0) - (a.popularity || 0);
         })
-        .slice(0, 80);
+        .slice(0, 40);
 }
 
 async function searchMovies() {
@@ -584,17 +910,8 @@ async function searchMovies() {
         return;
     }
 
-    if (!TMDB_API_KEY) {
-        resultsContainer.innerHTML = `
-            <div class="empty-state">
-                <div class="empty-state-icon">🔑</div>
-                <div class="empty-state-text">
-                    Please add your TMDB API key to search.<br><br>
-                    Get a free API key at: <a href="https://www.themoviedb.org/settings/api" target="_blank">themoviedb.org</a><br>
-                    Then add it to the TMDB_API_KEY variable in app.js
-                </div>
-            </div>
-        `;
+    if (!hasTMDBApiKey()) {
+        resultsContainer.innerHTML = renderTMDBSetupMessage('Search is disabled until a TMDB API key is configured.');
         return;
     }
 
@@ -729,8 +1046,13 @@ function renderSearchResults(results, mediaType = 'movie', query = '', collectio
         mediaType: mediaType,
         query: query,
         year: null,
+        yearMode: 'best',
+        genreId: '',
+        activeFilter: 'search',
         collections: collections,
-        franchiseResults: franchiseResults
+        franchiseResults: franchiseResults,
+        collectionId: null,
+        previousState: null
     };
 
     renderSearchGrid(results, query, collections, franchiseResults);
@@ -763,10 +1085,10 @@ function renderSearchGrid(results, query, collections = [], franchiseResults = [
                         transition: transform 0.3s;
                         font-size: 14px;
                     ">&#9654;</span>
-                    <h3 style="margin: 0; color: var(--text-primary); font-size: 16px;">Smart Franchise Group (${franchiseResults.length})</h3>
+                    <h3 style="margin: 0; color: var(--text-primary); font-size: 16px;">Franchise Matches (${franchiseResults.length})</h3>
                 </div>
                 <div style="margin-top: 8px; color: var(--text-secondary); font-size: 12px;">
-                    Ranked by TMDB signals: direct match, keyword graph, recommendations, and similar titles.
+                    Curated from title membership, official franchise links, and stronger TMDB evidence.
                 </div>
                 <div class="collections-grid" id="franchise-grid" style="display: none; gap: 15px; flex-wrap: wrap; margin-top: 15px;">
                     ${franchiseResults.filter(item => !isItemHidden(item.id, item.media_type || 'movie')).map(item => {
@@ -922,6 +1244,8 @@ function renderSearchGrid(results, query, collections = [], franchiseResults = [
 function renderBrowseGrid(results, mediaType, query = null, year = null) {
     const container = document.getElementById('browse-results');
     const mediaLabel = mediaType === 'tv' ? 'TV shows' : 'movies';
+    const yearMode = currentBrowseState.yearMode || 'best';
+    const yearModeLabel = yearMode === 'popular' ? 'most popular' : 'best reviewed';
 
     let headerHTML = '';
     if (query) {
@@ -930,7 +1254,7 @@ function renderBrowseGrid(results, mediaType, query = null, year = null) {
         </div>`;
     } else if (year) {
         headerHTML = `<div style="margin-bottom: 20px; color: var(--text-secondary);">
-            Showing top ${results.length} ${mediaLabel} from ${year}
+            Showing the ${yearModeLabel} ${mediaLabel} from ${year}
         </div>`;
     }
 
@@ -1123,6 +1447,78 @@ function showStreamingModal(providers, justWatchLink) {
     document.body.appendChild(overlay);
 }
 
+function renderCollectionResults(state) {
+    const resultsContainer = document.getElementById('browse-results');
+    const previousState = state.previousState;
+
+    let html = `
+        <div style="margin-bottom: 20px;">
+            <button class="btn btn-secondary btn-small" onclick="goBackFromCollection()" style="margin-bottom: 15px;">← Back to results</button>
+            <h3 style="color: var(--text-primary);">${state.query}</h3>
+            <p style="color: var(--text-secondary);">${state.results.length} movies in this collection</p>
+        </div>
+    `;
+    html += '<div class="movie-grid"></div>';
+    resultsContainer.innerHTML = html;
+
+    const grid = resultsContainer.querySelector('.movie-grid');
+    state.results.forEach(item => {
+        if (isItemHidden(item.id, 'movie')) return;
+
+        const isInWatchlist = movies.watchlist.some(m => m.id === item.id && (m.mediaType || 'movie') === 'movie');
+        const isWatched = movies.watched.some(m => m.id === item.id && (m.mediaType || 'movie') === 'movie');
+
+        const card = document.createElement('div');
+        card.className = 'movie-card';
+        card.innerHTML = `
+            <img
+                src="${item.poster_path ? TMDB_IMAGE_BASE + item.poster_path : 'https://via.placeholder.com/500x750?text=No+Poster'}"
+                alt="${item.title}"
+                class="movie-poster"
+            />
+            <div class="movie-info">
+                <div class="movie-title">${item.title}</div>
+                <div class="movie-year">${item.release_date ? item.release_date.split('-')[0] : 'N/A'}</div>
+                ${item.vote_average ? `<div style="margin: 5px 0; font-size: 13px; color: var(--text-secondary);">⭐ ${item.vote_average.toFixed(1)}/10</div>` : ''}
+                <div class="movie-actions">
+                    ${!isInWatchlist && !isWatched ?
+                        `<button class="btn btn-primary btn-small" onclick="event.stopPropagation(); addToWatchlist(${item.id}, 'movie')">+ Watchlist</button>` :
+                        ''}
+                    ${isInWatchlist ?
+                        `<button class="btn btn-danger btn-small" onclick="event.stopPropagation(); removeFromWatchlist(${item.id}, 'movie')">− Watchlist</button>` :
+                        ''}
+                    ${!isWatched ?
+                        `<button class="btn btn-secondary btn-small" onclick="event.stopPropagation(); addToWatched(${item.id}, 'movie')">✓ Watched</button>` :
+                        `<button class="btn btn-danger btn-small" onclick="event.stopPropagation(); removeFromWatched(${item.id}, 'movie')">✗ Unwatch</button>`}
+                </div>
+                <button class="btn btn-small streaming-btn" onclick="event.stopPropagation(); showStreamingInfo(${item.id}, 'movie')" style="margin-top: 8px; width: 100%; background: var(--bg-secondary); border: 1px solid var(--border);">
+                    📺 Where to Watch
+                </button>
+                <button class="btn btn-small" onclick="event.stopPropagation(); hideItem(${item.id}, 'movie')" style="margin-top: 4px; width: 100%; background: transparent; border: 1px solid var(--border); color: var(--text-secondary); font-size: 11px;">
+                    🚫 Not Interested
+                </button>
+            </div>
+        `;
+
+        card.querySelector('.movie-poster').addEventListener('click', () => showMediaDetail(item.id, null, 'movie'));
+        grid.appendChild(card);
+    });
+
+    if (!previousState) {
+        const backButton = resultsContainer.querySelector('button');
+        backButton.style.display = 'none';
+    }
+}
+
+function goBackFromCollection() {
+    if (currentBrowseState.mode === 'collection' && currentBrowseState.previousState) {
+        restoreBrowseState(currentBrowseState.previousState);
+        return;
+    }
+
+    initializeBrowse();
+}
+
 async function loadCollection(collectionId) {
     const resultsContainer = document.getElementById('browse-results');
     resultsContainer.innerHTML = `<div class="loading"><div class="spinner"></div>Loading collection...</div>`;
@@ -1134,76 +1530,26 @@ async function loadCollection(collectionId) {
         const collection = await response.json();
 
         if (collection.parts && collection.parts.length > 0) {
-            // Sort by release date
             const sortedParts = collection.parts.sort((a, b) =>
                 (a.release_date || '').localeCompare(b.release_date || '')
             );
 
-            // Store state for re-rendering
             currentBrowseState = {
                 mode: 'collection',
                 results: sortedParts,
                 mediaType: 'movie',
                 query: collection.name,
                 year: null,
+                yearMode: 'best',
+                genreId: '',
+                activeFilter: 'collection',
                 collections: [],
-                collectionId: collectionId
+                franchiseResults: [],
+                collectionId: collectionId,
+                previousState: cloneBrowseState(currentBrowseState)
             };
 
-            // Render with collection header
-            let html = `
-                <div style="margin-bottom: 20px;">
-                    <button class="btn btn-secondary btn-small" onclick="searchMovies()" style="margin-bottom: 15px;">← Back to search</button>
-                    <h3 style="color: var(--text-primary);">${collection.name}</h3>
-                    <p style="color: var(--text-secondary);">${collection.parts.length} movies in this collection</p>
-                </div>
-            `;
-            html += '<div class="movie-grid"></div>';
-            resultsContainer.innerHTML = html;
-
-            const grid = resultsContainer.querySelector('.movie-grid');
-            sortedParts.forEach(item => {
-                // Skip hidden items
-                if (isItemHidden(item.id, 'movie')) return;
-
-                const isInWatchlist = movies.watchlist.some(m => m.id === item.id && (m.mediaType || 'movie') === 'movie');
-                const isWatched = movies.watched.some(m => m.id === item.id && (m.mediaType || 'movie') === 'movie');
-
-                const card = document.createElement('div');
-                card.className = 'movie-card';
-                card.innerHTML = `
-                    <img
-                        src="${item.poster_path ? TMDB_IMAGE_BASE + item.poster_path : 'https://via.placeholder.com/500x750?text=No+Poster'}"
-                        alt="${item.title}"
-                        class="movie-poster"
-                    />
-                    <div class="movie-info">
-                        <div class="movie-title">${item.title}</div>
-                        <div class="movie-year">${item.release_date ? item.release_date.split('-')[0] : 'N/A'}</div>
-                        ${item.vote_average ? `<div style="margin: 5px 0; font-size: 13px; color: var(--text-secondary);">⭐ ${item.vote_average.toFixed(1)}/10</div>` : ''}
-                        <div class="movie-actions">
-                            ${!isInWatchlist && !isWatched ?
-                                `<button class="btn btn-primary btn-small" onclick="event.stopPropagation(); addToWatchlist(${item.id}, 'movie')">+ Watchlist</button>` :
-                                ''}
-                            ${isInWatchlist ?
-                                `<button class="btn btn-danger btn-small" onclick="event.stopPropagation(); removeFromWatchlist(${item.id}, 'movie')">− Watchlist</button>` :
-                                ''}
-                            ${!isWatched ?
-                                `<button class="btn btn-secondary btn-small" onclick="event.stopPropagation(); addToWatched(${item.id}, 'movie')">✓ Watched</button>` :
-                                `<button class="btn btn-danger btn-small" onclick="event.stopPropagation(); removeFromWatched(${item.id}, 'movie')">✗ Unwatch</button>`}
-                        </div>
-                        <button class="btn btn-small streaming-btn" onclick="event.stopPropagation(); showStreamingInfo(${item.id}, 'movie')" style="margin-top: 8px; width: 100%; background: var(--bg-secondary); border: 1px solid var(--border);">
-                            📺 Where to Watch
-                        </button>
-                        <button class="btn btn-small" onclick="event.stopPropagation(); hideItem(${item.id}, 'movie')" style="margin-top: 4px; width: 100%; background: transparent; border: 1px solid var(--border); color: var(--text-secondary); font-size: 11px;">
-                            🚫 Not Interested
-                        </button>
-                    </div>
-                `;
-
-                card.querySelector('.movie-poster').addEventListener('click', () => showMediaDetail(item.id, null, 'movie'));
-                grid.appendChild(card);
-            });
+            renderCollectionResults(currentBrowseState);
         }
     } catch (error) {
         console.error('Error loading collection:', error);
@@ -1212,7 +1558,7 @@ async function loadCollection(collectionId) {
 }
 
 async function getMovieDetails(movieId) {
-    if (!TMDB_API_KEY) return null;
+    if (!hasTMDBApiKey()) return null;
 
     try {
         const response = await fetch(
@@ -1226,7 +1572,7 @@ async function getMovieDetails(movieId) {
 }
 
 async function getTVDetails(tvId) {
-    if (!TMDB_API_KEY) return null;
+    if (!hasTMDBApiKey()) return null;
 
     try {
         const response = await fetch(
@@ -1252,7 +1598,7 @@ async function fetchGenres(mediaType = 'movie') {
     const cache = mediaType === 'tv' ? tvGenresCache : movieGenresCache;
     if (cache) return cache;
 
-    if (!TMDB_API_KEY) return [];
+    if (!hasTMDBApiKey()) return [];
 
     try {
         const response = await fetch(
@@ -1291,6 +1637,26 @@ async function updateGenresForMediaType() {
     });
 }
 
+function populateYearFilter() {
+    const yearFilter = document.getElementById('year-filter');
+    const previousValue = yearFilter.value;
+    const currentYear = new Date().getFullYear();
+    const earliestYear = 1950;
+
+    yearFilter.innerHTML = '<option value="">Choose a year</option>';
+
+    for (let year = currentYear; year >= earliestYear; year--) {
+        const option = document.createElement('option');
+        option.value = year;
+        option.textContent = year;
+        yearFilter.appendChild(option);
+    }
+
+    if (previousValue && Number(previousValue) >= earliestYear && Number(previousValue) <= currentYear) {
+        yearFilter.value = previousValue;
+    }
+}
+
 async function initializeBrowse() {
     // Load genres into dropdown
     const genreFilter = document.getElementById('genre-filter');
@@ -1305,17 +1671,8 @@ async function initializeBrowse() {
         });
     }
 
-    // Load years into dropdown (last 25 years)
-    const yearFilter = document.getElementById('year-filter');
-    if (yearFilter.options.length === 1) { // Only has "Select Year"
-        const currentYear = new Date().getFullYear();
-        for (let year = currentYear; year >= currentYear - 24; year--) {
-            const option = document.createElement('option');
-            option.value = year;
-            option.textContent = year;
-            yearFilter.appendChild(option);
-        }
-    }
+    // Load years into dropdown
+    populateYearFilter();
 
     // Load default content (popular movies)
     loadBrowseMovies('popular');
@@ -1326,17 +1683,13 @@ async function loadBrowseMovies(filter) {
     const activeFilter = filter || document.querySelector('.filter-btn.active').dataset.filter;
     const genreId = document.getElementById('genre-filter').value;
     const selectedYear = document.getElementById('year-filter').value;
+    const yearMode = document.getElementById('year-mode-filter').value;
     const mediaType = document.getElementById('media-type-filter').value;
 
     const mediaLabel = mediaType === 'tv' ? 'TV shows' : 'movies';
 
-    if (!TMDB_API_KEY) {
-        resultsContainer.innerHTML = `
-            <div class="empty-state">
-                <div class="empty-state-icon">🔑</div>
-                <div class="empty-state-text">Please add your TMDB API key to browse ${mediaLabel}.</div>
-            </div>
-        `;
+    if (!hasTMDBApiKey()) {
+        resultsContainer.innerHTML = renderTMDBSetupMessage(`Browse is disabled until a TMDB API key is configured for ${mediaLabel}.`);
         return;
     }
 
@@ -1347,18 +1700,7 @@ async function loadBrowseMovies(filter) {
 
         switch(activeFilter) {
             case 'trending':
-                // Trending supports both movies and TV
-                const trendingUrl = `${TMDB_BASE_URL}/trending/${mediaType}/week?api_key=${TMDB_API_KEY}`;
-                const trendingResponse = await fetch(trendingUrl);
-                const trendingData = await trendingResponse.json();
-                results = trendingData.results || [];
-
-                // Filter by genre client-side if needed
-                if (genreId) {
-                    results = results.filter(item =>
-                        item.genre_ids && item.genre_ids.includes(parseInt(genreId))
-                    );
-                }
+                results = await fetchTrendingResults(mediaType, { genreId, pageLimit: 2 });
                 break;
 
             case 'by_year':
@@ -1366,38 +1708,46 @@ async function loadBrowseMovies(filter) {
                     resultsContainer.innerHTML = `
                         <div class="empty-state">
                             <div class="empty-state-icon">📅</div>
-                            <div class="empty-state-text">Please select a year to browse top-rated ${mediaLabel}</div>
+                            <div class="empty-state-text">Choose a specific year to browse the best ${mediaLabel} released then.</div>
                         </div>
                     `;
                     return;
                 }
 
-                // Fetch top 100 from the selected year with quality filtering
-                // Fetch multiple pages to get top 100
-                for (let page = 1; page <= 5; page++) {
+                // Fetch a broad candidate pool, then rank it locally into something usable.
+                const seenKeys = new Set();
+                for (let page = 1; page <= 4; page++) {
                     let discoverUrl = `${TMDB_BASE_URL}/discover/${mediaType}?api_key=${TMDB_API_KEY}`;
 
                     // Different date fields for movies vs TV
                     if (mediaType === 'tv') {
                         discoverUrl += `&first_air_date_year=${selectedYear}`;
-                        discoverUrl += `&vote_count.gte=50`; // TV shows typically have fewer votes
+                        discoverUrl += yearMode === 'popular' ? `&vote_count.gte=25` : `&vote_count.gte=40`;
                     } else {
                         discoverUrl += `&primary_release_year=${selectedYear}`;
-                        discoverUrl += `&vote_count.gte=200`; // Higher threshold for movies to ensure quality
+                        discoverUrl += yearMode === 'popular' ? `&vote_count.gte=80` : `&vote_count.gte=120`;
                     }
 
-                    discoverUrl += `&sort_by=vote_average.desc`;
-                    discoverUrl += `&vote_average.gte=6.0`; // Only items rated 6.0 or higher
+                    discoverUrl += yearMode === 'popular' ? `&sort_by=popularity.desc` : `&sort_by=vote_average.desc`;
+                    discoverUrl += yearMode === 'popular' ? `&vote_average.gte=5.5` : `&vote_average.gte=6.5`;
                     if (genreId) discoverUrl += `&with_genres=${genreId}`;
                     discoverUrl += `&page=${page}`;
 
                     const response = await fetch(discoverUrl);
                     const data = await response.json();
-                    results = results.concat(data.results || []);
+                    (data.results || []).forEach(item => {
+                        const key = `${mediaType}-${item.id}`;
+                        if (!seenKeys.has(key)) {
+                            seenKeys.add(key);
+                            results.push(item);
+                        }
+                    });
 
-                    if (results.length >= 100) break;
+                    if (results.length >= 80) break;
                 }
-                results = results.slice(0, 100); // Take top 100
+                results = results
+                    .sort((a, b) => calculateYearRankingScore(b, mediaType, yearMode) - calculateYearRankingScore(a, mediaType, yearMode))
+                    .slice(0, 60);
                 break;
 
             case 'top_rated':
@@ -1450,12 +1800,21 @@ async function loadBrowseMovies(filter) {
 
 function renderBrowseResults(results, year = null, mediaType = 'movie') {
     // Store current state for re-rendering
+    const genreId = document.getElementById('genre-filter').value;
+    const activeFilter = document.querySelector('.filter-btn.active')?.dataset.filter || 'popular';
     currentBrowseState = {
         mode: 'browse',
         results: results,
         mediaType: mediaType,
         query: null,
-        year: year
+        year: year,
+        yearMode: document.getElementById('year-mode-filter').value,
+        genreId: genreId,
+        activeFilter: activeFilter,
+        collections: [],
+        franchiseResults: [],
+        collectionId: null,
+        previousState: null
     };
 
     renderBrowseGrid(results, mediaType, null, year);
@@ -1466,7 +1825,7 @@ function renderBrowseResults(results, year = null, mediaType = 'movie') {
 async function addToWatchlist(mediaId, mediaType = 'movie') {
     if (movies.watchlist.some(m => m.id === mediaId && (m.mediaType || 'movie') === mediaType)) {
         showToast('Already in watchlist');
-        return;
+        return false;
     }
 
     // Show loading state
@@ -1475,7 +1834,7 @@ async function addToWatchlist(mediaId, mediaType = 'movie') {
     const details = await getMediaDetails(mediaId, mediaType);
     if (!details) {
         showToast(`Error adding ${mediaType === 'tv' ? 'show' : 'movie'}`);
-        return;
+        return false;
     }
 
     const item = {
@@ -1504,15 +1863,13 @@ async function addToWatchlist(mediaId, mediaType = 'movie') {
 
     // Refresh the current view to update button states
     refreshCurrentView();
+    return true;
 }
 
 async function addToWatched(mediaId, mediaType = 'movie') {
-    // Remove from watchlist if present
-    movies.watchlist = movies.watchlist.filter(m => !(m.id === mediaId && (m.mediaType || 'movie') === mediaType));
-
     if (movies.watched.some(m => m.id === mediaId && (m.mediaType || 'movie') === mediaType)) {
         showToast('Already in watched list');
-        return;
+        return false;
     }
 
     // Show loading state
@@ -1521,7 +1878,7 @@ async function addToWatched(mediaId, mediaType = 'movie') {
     const details = await getMediaDetails(mediaId, mediaType);
     if (!details) {
         showToast(`Error adding ${mediaType === 'tv' ? 'show' : 'movie'}`);
-        return;
+        return false;
     }
 
     const item = {
@@ -1545,6 +1902,11 @@ async function addToWatched(mediaId, mediaType = 'movie') {
         review: ''
     };
 
+    const watchlistIndex = movies.watchlist.findIndex(m => m.id === mediaId && (m.mediaType || 'movie') === mediaType);
+    if (watchlistIndex !== -1) {
+        movies.watchlist.splice(watchlistIndex, 1);
+    }
+
     movies.watched.push(item);
     saveMoviesToStorage();
     updateCounts();
@@ -1553,6 +1915,7 @@ async function addToWatched(mediaId, mediaType = 'movie') {
 
     // Refresh the current view to update button states
     refreshCurrentView();
+    return true;
 }
 
 function moveToWatched(movieId, mediaType = 'movie') {
@@ -1560,7 +1923,12 @@ function moveToWatched(movieId, mediaType = 'movie') {
     const movie = movies.watchlist.find(m => m.id === movieId && (m.mediaType || 'movie') === mediaType);
     if (!movie) {
         console.log('Movie not found in watchlist:', movieId, mediaType);
-        return;
+        return false;
+    }
+
+    if (movies.watched.some(m => m.id === movieId && (m.mediaType || 'movie') === mediaType)) {
+        showToast('Already in watched list');
+        return false;
     }
 
     movies.watchlist = movies.watchlist.filter(m => !(m.id === movieId && (m.mediaType || 'movie') === mediaType));
@@ -1572,8 +1940,9 @@ function moveToWatched(movieId, mediaType = 'movie') {
     saveMoviesToStorage();
     updateCounts();
     updateStats();
-    renderWatchlist();
+    refreshCurrentView();
     showToast(`Marked "${movie.title}" as watched`);
+    return true;
 }
 
 function moveToWatchlist(movieId, mediaType = 'movie') {
@@ -1581,7 +1950,12 @@ function moveToWatchlist(movieId, mediaType = 'movie') {
     const movie = movies.watched.find(m => m.id === movieId && (m.mediaType || 'movie') === mediaType);
     if (!movie) {
         console.log('Movie not found in watched:', movieId, mediaType);
-        return;
+        return false;
+    }
+
+    if (movies.watchlist.some(m => m.id === movieId && (m.mediaType || 'movie') === mediaType)) {
+        showToast('Already in watchlist');
+        return false;
     }
 
     movies.watched = movies.watched.filter(m => !(m.id === movieId && (m.mediaType || 'movie') === mediaType));
@@ -1598,41 +1972,44 @@ function moveToWatchlist(movieId, mediaType = 'movie') {
     saveMoviesToStorage();
     updateCounts();
     updateStats();
-    renderWatched();
+    refreshCurrentView();
     showToast(`Moved "${movie.title}" back to watchlist`);
+    return true;
 }
 
 function removeFromWatchlist(movieId, mediaType = 'movie') {
     const movie = movies.watchlist.find(m => m.id === movieId && (m.mediaType || 'movie') === mediaType);
-    if (!movie) return;
+    if (!movie) return false;
 
     // Confirm before removing
     if (!confirm(`Remove "${movie.title}" from watchlist?`)) {
-        return;
+        return false;
     }
 
     movies.watchlist = movies.watchlist.filter(m => !(m.id === movieId && (m.mediaType || 'movie') === mediaType));
     saveMoviesToStorage();
     updateCounts();
-    renderWatchlist();
+    refreshCurrentView();
     showToast(`Removed "${movie.title}" from watchlist`);
+    return true;
 }
 
 function removeFromWatched(movieId, mediaType = 'movie') {
     const movie = movies.watched.find(m => m.id === movieId && (m.mediaType || 'movie') === mediaType);
-    if (!movie) return;
+    if (!movie) return false;
 
     // Confirm before removing
     if (!confirm(`Remove "${movie.title}" from watched list? This will also delete your rating.`)) {
-        return;
+        return false;
     }
 
     movies.watched = movies.watched.filter(m => !(m.id === movieId && (m.mediaType || 'movie') === mediaType));
     saveMoviesToStorage();
     updateCounts();
     updateStats();
-    renderWatched();
+    refreshCurrentView();
     showToast(`Removed "${movie.title}" from watched list`);
+    return true;
 }
 
 function rateMovie(movieId, rating, mediaType = 'movie') {
@@ -2084,14 +2461,14 @@ function displayMovieModal(movie, listType) {
 
                 <div class="modal-actions" style="margin-top: 15px; display: flex; gap: 10px; flex-wrap: wrap;">
                     ${!isInWatchlist && !isWatched ?
-                        `<button class="btn btn-primary" onclick="addToWatchlist(${movie.id}, '${mediaType}'); closeModal();">+ Add to Watchlist</button>` :
+                        `<button class="btn btn-primary" onclick="handleModalAction(() => addToWatchlist(${movie.id}, '${mediaType}'))">+ Add to Watchlist</button>` :
                         ''}
                     ${isInWatchlist ?
-                        `<button class="btn btn-danger" onclick="removeFromWatchlist(${movie.id}, '${mediaType}'); closeModal();">− Remove from Watchlist</button>` :
+                        `<button class="btn btn-danger" onclick="handleModalAction(() => removeFromWatchlist(${movie.id}, '${mediaType}'))">− Remove from Watchlist</button>` :
                         ''}
                     ${!isWatched ?
-                        `<button class="btn btn-secondary" onclick="addToWatched(${movie.id}, '${mediaType}'); closeModal();">✓ Mark as Watched</button>` :
-                        `<button class="btn btn-danger" onclick="removeFromWatched(${movie.id}, '${mediaType}'); closeModal();">✗ Remove from Watched</button>`}
+                        `<button class="btn btn-secondary" onclick="handleModalAction(() => addToWatched(${movie.id}, '${mediaType}'))">✓ Mark as Watched</button>` :
+                        `<button class="btn btn-danger" onclick="handleModalAction(() => removeFromWatched(${movie.id}, '${mediaType}'))">✗ Remove from Watched</button>`}
                 </div>
 
                 ${isWatched ? `
@@ -2166,6 +2543,13 @@ function displayMovieModal(movie, listType) {
 
     // Prevent body scroll when modal is open
     document.body.style.overflow = 'hidden';
+}
+
+async function handleModalAction(action) {
+    const result = await action();
+    if (result) {
+        closeModal();
+    }
 }
 
 function openRatingModal(movieId, mediaType = 'movie') {
@@ -2309,15 +2693,13 @@ async function loadRecommendations() {
             ]).then(([movies, tv]) => [...movies, ...tv]);
         });
 
-        // 8. Fetch trending this week
+        // 8. Fetch trending using both daily and weekly TMDB signals
         const trendingPromise = Promise.all([
-            fetch(`${TMDB_BASE_URL}/trending/movie/week?api_key=${TMDB_API_KEY}&page=1`)
-                .then(r => r.json())
-                .then(data => (data.results || []).map(r => ({ ...r, mediaType: 'movie', source: 'Trending', section: 'trending' })))
+            fetchTrendingResults('movie', { pageLimit: 2 })
+                .then(items => items.map(item => ({ ...item, source: 'Trending', section: 'trending' })))
                 .catch(() => []),
-            fetch(`${TMDB_BASE_URL}/trending/tv/week?api_key=${TMDB_API_KEY}&page=1`)
-                .then(r => r.json())
-                .then(data => (data.results || []).map(r => ({ ...r, mediaType: 'tv', source: 'Trending', section: 'trending' })))
+            fetchTrendingResults('tv', { pageLimit: 2 })
+                .then(items => items.map(item => ({ ...item, source: 'Trending', section: 'trending' })))
                 .catch(() => [])
         ]).then(([movies, tv]) => [...movies, ...tv]);
 
@@ -2367,9 +2749,12 @@ async function loadRecommendations() {
         // Trending gets lower priority
         addRecs([trendingResults], 1);
 
-        // 12. Sort: priority first, then by vote average
+        // 12. Sort: priority first, then by trending score or vote average
         allRecs.sort((a, b) => {
             if (b.priority !== a.priority) return b.priority - a.priority;
+            if ((b.trendingScore || 0) !== (a.trendingScore || 0)) {
+                return (b.trendingScore || 0) - (a.trendingScore || 0);
+            }
             return (b.vote_average || 0) - (a.vote_average || 0);
         });
 
@@ -2599,7 +2984,7 @@ function renderGenreStats() {
 
     container.innerHTML = sortedGenres.map(([genre, count]) => `
         <div class="genre-item">
-            <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+            <div class="genre-item-header">
                 <strong>${genre}</strong>
                 <span>${count} ${count === 1 ? 'item' : 'items'}</span>
             </div>
@@ -2616,23 +3001,41 @@ function saveMoviesToStorage() {
     localStorage.setItem('movieTrackerData', JSON.stringify(movies));
 }
 
+function normalizeStoredItem(item, fallbackMediaType = 'movie') {
+    if (!item || typeof item !== 'object') return null;
+
+    return {
+        ...item,
+        mediaType: item.mediaType || fallbackMediaType,
+        genres: Array.isArray(item.genres) ? item.genres : [],
+        cast: Array.isArray(item.cast) ? item.cast : [],
+        crew: Array.isArray(item.crew) ? item.crew : []
+    };
+}
+
 function loadMoviesFromStorage() {
     const stored = localStorage.getItem('movieTrackerData');
-    if (stored) {
-        movies = JSON.parse(stored);
+    if (!stored) {
+        movies = { watchlist: [], watched: [] };
+        return;
+    }
 
-        // Normalize data: ensure all items have mediaType set (for backwards compatibility)
-        movies.watchlist = movies.watchlist.map(m => ({
-            ...m,
-            mediaType: m.mediaType || 'movie'
-        }));
-        movies.watched = movies.watched.map(m => ({
-            ...m,
-            mediaType: m.mediaType || 'movie'
-        }));
+    try {
+        const parsed = JSON.parse(stored);
+        const watchlist = Array.isArray(parsed?.watchlist) ? parsed.watchlist : [];
+        const watched = Array.isArray(parsed?.watched) ? parsed.watched : [];
 
-        // Save the normalized data back
+        movies = {
+            watchlist: watchlist.map(item => normalizeStoredItem(item)).filter(Boolean),
+            watched: watched.map(item => normalizeStoredItem(item)).filter(Boolean)
+        };
+
         saveMoviesToStorage();
+    } catch (error) {
+        console.error('Error loading saved movie data:', error);
+        movies = { watchlist: [], watched: [] };
+        saveMoviesToStorage();
+        showToast('Saved movie data was corrupted and has been reset.');
     }
 }
 
@@ -2688,7 +3091,16 @@ function toggleFranchiseResults() {
 
 function getHiddenItems() {
     const stored = localStorage.getItem('hiddenItems');
-    return stored ? JSON.parse(stored) : [];
+    if (!stored) return [];
+
+    try {
+        const parsed = JSON.parse(stored);
+        return Array.isArray(parsed) ? parsed.filter(item => typeof item === 'string') : [];
+    } catch (error) {
+        console.error('Error loading hidden items:', error);
+        saveHiddenItems([]);
+        return [];
+    }
 }
 
 function saveHiddenItems(items) {

@@ -1,14 +1,15 @@
 # 🎬 Movie Tracker
 
-A simple, interactive website to track movies you want to watch and have watched. Built with vanilla HTML, CSS, and JavaScript - no frameworks required!
+A simple, interactive website to track movies and TV shows you want to watch and have watched. Built with vanilla HTML, CSS, and JavaScript, with no framework or build step.
 
 ## Features
 
-- **Search Movies**: Search the TMDB database for movies with posters and details
+- **Browse & Search**: Search the TMDB database for movies and TV shows, or browse popular, trending, top-rated, and by-year picks
 - **Watchlist**: Keep track of movies you want to watch
-- **Watched List**: Track movies you've already seen
+- **Watched List**: Track what you've already seen
 - **Rating System**: Rate movies from 1-10 with an intuitive star interface
-- **Statistics Dashboard**: View your watching habits, top-rated movies, and favorite genres
+- **Recommendations**: Get personalized suggestions based on your watched items and ratings
+- **Statistics Dashboard**: View your watching habits, top-rated titles, and favorite genres
 - **Dark/Light Theme**: Toggle between dark and light modes (preference saved)
 - **Responsive Design**: Works great on desktop, tablet, and mobile devices
 - **Local Storage**: All your data is saved locally in your browser
@@ -25,6 +26,7 @@ A simple, interactive website to track movies you want to watch and have watched
    - Open `app.js`
    - Find the line `const TMDB_API_KEY = '';`
    - Paste your API key between the quotes: `const TMDB_API_KEY = 'your_key_here';`
+   - Save the file and reload the page
 
 3. **Open the App**:
    - Simply open `index.html` in your web browser
@@ -32,11 +34,11 @@ A simple, interactive website to track movies you want to watch and have watched
 
 ## How to Use
 
-### Searching for Movies
-1. Click the "Search" tab
-2. Type a movie title in the search box
+### Browsing and Searching
+1. Open the `Browse` tab
+2. Type a movie or TV show title in the search box, or use the browse filters
 3. Click "Search" or press Enter
-4. Browse results with posters and release years
+4. Browse results with posters, years, streaming info, and collection/franchise drill-ins
 
 ### Adding Movies
 - **To Watchlist**: Click the "+ Watchlist" button on any movie
@@ -48,13 +50,14 @@ A simple, interactive website to track movies you want to watch and have watched
 3. Click the stars to rate from 1-10
 4. Your rating is saved automatically
 
-### Viewing Statistics
+### Recommendations and Statistics
+- Click the "For You" tab to see recommendation sections based on your collection
 - Click the "Stats" tab to see:
-  - Total movies in your collection
-  - Number of watched movies
+  - Total items in your collection
+  - Number of watched items
   - Your average rating
   - Total hours watched
-  - Your top-rated movies
+  - Your top-rated titles
   - Favorite genres
 
 ### Theme Toggle
@@ -66,7 +69,7 @@ A simple, interactive website to track movies you want to watch and have watched
 - **No Dependencies**: Pure HTML, CSS, and JavaScript
 - **No Build Process**: Just open and run
 - **Data Storage**: localStorage (stays in your browser)
-- **API**: The Movie Database (TMDB) API for movie information
+- **API**: The Movie Database (TMDB) API for browsing, search, details, and recommendations
 - **Responsive**: Mobile-friendly design
 
 ## Project Structure
@@ -89,7 +92,7 @@ Works on all modern browsers:
 
 ## Data Privacy
 
-All your data is stored locally in your browser using localStorage. Nothing is sent to any server (except TMDB API calls for searching movies). Your watchlist, ratings, and preferences stay on your device.
+All your data is stored locally in your browser using `localStorage`. Nothing is sent to any server other than TMDB API requests for browsing, search, details, and recommendations. Your watchlist, ratings, hidden items, and theme preference stay on your device.
 
 ## Future Enhancements
 
@@ -113,4 +116,4 @@ Free to use and modify as you like!
 
 ---
 
-**Need help?** Make sure you've added your TMDB API key in `app.js`. If you're still having issues, check the browser console for error messages.
+**Need help?** Make sure you've added your TMDB API key in `app.js`. If the app still has issues, clear bad local data in DevTools `localStorage` or check the browser console for errors.
