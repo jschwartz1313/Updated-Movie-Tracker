@@ -474,7 +474,9 @@ const FRANCHISE_RULES = {
             'tales of the empire',
             'tales of the underworld',
             'forces of destiny',
-            'detours'
+            'detours',
+            'ewoks',
+            'the ewok adventures'
         ],
         standaloneAliases: [
             'the mandalorian',
@@ -492,6 +494,54 @@ const FRANCHISE_RULES = {
             'the book of boba fett': ['tv'],
             'the acolyte': ['tv']
         },
+        narrativeTitlePatterns: [
+            /^star wars$/,
+            /^star wars episode /,
+            /^star wars the /,
+            /^the empire strikes back$/,
+            /^return of the jedi$/,
+            /^star wars rebels$/,
+            /^star wars resistance$/,
+            /^star wars droids$/,
+            /^star wars visions$/,
+            /^star wars clone wars$/,
+            /^star wars maul shadow lord$/,
+            /^star wars ewoks$/,
+            /^ewoks$/,
+            /^ewoks the battle for endor$/,
+            /^caravan of courage /,
+            /^rogue one /,
+            /^solo a star wars story$/,
+            /^the mandalorian$/,
+            /^andor$/,
+            /^ahsoka$/,
+            /^obi wan kenobi$/,
+            /^the book of boba fett$/,
+            /^the acolyte$/,
+            /^lego star wars /
+        ],
+        supplementalTitlePatterns: [
+            / holiday special$/,
+            / summer vacation$/,
+            / terrifying tales$/,
+            / galaxy of adventures$/,
+            / galaxy of sounds$/,
+            / fun with nubs$/,
+            / go rogue$/,
+            / biomes$/,
+            / detours$/,
+            / dreams$/,
+            / tech$/,
+            / squadrons hunted$/,
+            / media offline$/,
+            / group effect$/,
+            /^star wars droids /,
+            /^lego star wars revenge of the brick$/,
+            /^lego star wars the quest for r2 d2$/,
+            /^lego star wars bombad bounty$/,
+            /^lego star wars the padawan menace$/,
+            /^lego star wars the empire strikes out$/
+        ],
         excludedTitlePatterns: [
             /^phineas and ferb /,
             /^robot chicken /,
@@ -748,6 +798,8 @@ function getFranchiseDefinition(query, franchiseTerms = []) {
             aliases[normalizeSearchText(alias)] = mediaTypes;
             return aliases;
         }, {}),
+        narrativeTitlePatterns: rule?.narrativeTitlePatterns || [],
+        supplementalTitlePatterns: rule?.supplementalTitlePatterns || [],
         excludedTitlePatterns: rule?.excludedTitlePatterns || [],
         minSignalCategories: rule?.minSignalCategories || 2,
         minimumScore: rule?.minimumScore || 80,
@@ -783,6 +835,9 @@ function getFranchiseTitleMatchStrength(item, definition) {
             return null;
         }
         if (isStandaloneAlias) continue;
+        if (definition.hasRule && !alias.includes(definition.query) && !titleNorm.includes(definition.query)) {
+            continue;
+        }
 
         if (aliasTokens.length >= 2 && titleNorm.startsWith(`${alias} `)) return 'prefix';
 
@@ -853,6 +908,37 @@ function addSignalCandidate(candidateMap, item, mediaType, score, reason, catego
     current.reasons.add(reason);
     current.categories.add(category);
     candidateMap.set(key, current);
+}
+
+function getFranchiseContentTier(item, definition) {
+    const titleNorm = normalizeSearchText(getMediaTitle(item));
+    if (!titleNorm || isExcludedFromFranchise(item, definition)) return 'excluded';
+
+    if (definition.supplementalTitlePatterns.some(pattern => pattern.test(titleNorm))) {
+        return 'supplemental';
+    }
+
+    if (definition.narrativeTitlePatterns.some(pattern => pattern.test(titleNorm))) {
+        return 'primary';
+    }
+
+    if (getFranchiseTitleMatchStrength(item, definition)) {
+        return 'primary';
+    }
+
+    return 'supplemental';
+}
+
+function isTrustedFranchiseCollection(collection, definition) {
+    const nameNorm = normalizeSearchText(collection?.name);
+    if (!nameNorm || !definition.hasRule) return false;
+
+    if (nameNorm === `${definition.query} collection`) return true;
+
+    return definition.aliases.some(alias => {
+        if (alias.length < 6) return false;
+        return nameNorm === `${alias} collection` || nameNorm.startsWith(`${alias} `);
+    });
 }
 
 function confidenceFromScore(score) {
@@ -964,10 +1050,26 @@ async function buildSmartFranchiseResults({
 
     // 5) Keep official collections as a weak fallback, not a primary source.
     if (collections.length > 0) {
-        const parts = await Promise.all(collections.slice(0, 3).map(c => fetchCollectionParts(c.id)));
-        parts.flat().forEach(item => {
-            if (!matchesDistinctiveFranchiseTerms(item, query, franchiseTerms)) return;
-            addSignalCandidate(candidateMap, item, 'movie', 34, 'Official TMDB collection', 'collection');
+        const collectionParts = await Promise.all(
+            collections.slice(0, 3).map(async collection => ({
+                collection,
+                parts: await fetchCollectionParts(collection.id)
+            }))
+        );
+
+        collectionParts.forEach(({ collection, parts }) => {
+            const isTrustedCollection = isTrustedFranchiseCollection(collection, definition);
+            parts.forEach(item => {
+                if (!isTrustedCollection && !matchesDistinctiveFranchiseTerms(item, query, franchiseTerms)) return;
+                addSignalCandidate(
+                    candidateMap,
+                    item,
+                    'movie',
+                    isTrustedCollection ? 62 : 34,
+                    isTrustedCollection ? `Official "${collection.name}" member` : 'Official TMDB collection',
+                    isTrustedCollection ? 'officialCollection' : 'collection'
+                );
+            });
         });
     }
 
@@ -978,18 +1080,22 @@ async function buildSmartFranchiseResults({
             _franchiseConfidence: confidenceFromScore(candidate.score),
             _franchiseReasons: [...candidate.reasons],
             _franchiseSignalCount: candidate.categories.size,
-            _franchiseCategories: [...candidate.categories]
+            _franchiseCategories: [...candidate.categories],
+            _franchiseTier: getFranchiseContentTier(candidate.item, definition)
         }))
         .filter(item => {
             const hasStrongTitleMatch = matchesDistinctiveFranchiseTerms(item, query, franchiseTerms);
             const categories = new Set(item._franchiseCategories || []);
             const hasCollectionEvidence = categories.has('collection');
+            const hasOfficialCollectionEvidence = categories.has('officialCollection');
             const hasDirectEvidence = categories.has('direct');
             const hasAliasEvidence = categories.has('alias');
             const hasEnoughSignals = (item._franchiseSignalCount || 0) >= definition.minSignalCategories;
             const isStrongEnough = item._franchiseScore >= definition.minimumScore;
+            const hasMembershipEvidence = hasStrongTitleMatch || hasOfficialCollectionEvidence;
 
-            return hasStrongTitleMatch && (
+            return item._franchiseTier !== 'excluded' && hasMembershipEvidence && (
+                hasOfficialCollectionEvidence ||
                 hasCollectionEvidence ||
                 hasDirectEvidence ||
                 hasAliasEvidence ||
@@ -1000,7 +1106,7 @@ async function buildSmartFranchiseResults({
             if (b._franchiseScore !== a._franchiseScore) return b._franchiseScore - a._franchiseScore;
             return (b.popularity || 0) - (a.popularity || 0);
         })
-        .slice(0, 40);
+        .slice(0, 80);
 }
 
 function mergeSearchResultSets(...resultSets) {
@@ -1025,7 +1131,21 @@ function mergeSearchResultSets(...resultSets) {
 }
 
 function sortFranchisePrimaryResults(a, b) {
-    const scoreDiff = (b._franchiseScore || 0) - (a._franchiseScore || 0);
+    const tierWeight = {
+        primary: 2,
+        supplemental: 1,
+        excluded: 0
+    };
+    const tierDiff = (tierWeight[b._franchiseTier] || 0) - (tierWeight[a._franchiseTier] || 0);
+    if (tierDiff !== 0) return tierDiff;
+
+    if ((a._franchiseTier || 'primary') === 'primary' && (b._franchiseTier || 'primary') === 'primary') {
+        const dateA = getReleaseDateForMedia(a, a.media_type || a.mediaType || 'movie') || '9999-12-31';
+        const dateB = getReleaseDateForMedia(b, b.media_type || b.mediaType || 'movie') || '9999-12-31';
+        if (dateA !== dateB) return dateA.localeCompare(dateB);
+    }
+
+    const scoreDiff = Math.min(b._franchiseScore || 0, 220) - Math.min(a._franchiseScore || 0, 220);
     if (scoreDiff !== 0) return scoreDiff;
 
     const dateA = getReleaseDateForMedia(a, a.media_type || a.mediaType || 'movie') || '';
@@ -1071,7 +1191,7 @@ async function searchMovies() {
             : [];
 
         // Franchise search: broaden search across related terms to build a "smart" franchise list
-        const MAX_FRANCHISE_TERMS = 18;
+        const MAX_FRANCHISE_TERMS = 32;
         const franchiseDefinition = getFranchiseDefinition(query, franchiseTerms);
         const franchiseSearchTerms = isFranchiseSearch
             ? [...new Set([...franchiseTerms, ...franchiseDefinition.aliases])]
@@ -1165,7 +1285,8 @@ async function searchMovies() {
             const primaryFranchiseResults = allFranchiseResults.length > 0 ? allFranchiseResults : filteredDirectResults;
 
             results = mergeSearchResultSets(primaryFranchiseResults)
-                .filter(item => matchesDistinctiveFranchiseTerms(item, query, franchiseTerms))
+                .filter(item => matchesDistinctiveFranchiseTerms(item, query, franchiseTerms) || (item._franchiseCategories || []).includes('officialCollection'))
+                .filter(item => (item._franchiseTier || 'primary') === 'primary')
                 .sort(sortFranchisePrimaryResults);
         }
 
