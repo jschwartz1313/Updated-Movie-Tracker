@@ -465,14 +465,48 @@ const FRANCHISE_RULES = {
             'the bad batch',
             'rebels',
             'visions',
-            'skeleton crew'
+            'skeleton crew',
+            'the acolyte',
+            'resistance',
+            'droids',
+            'young jedi adventures',
+            'tales of the jedi',
+            'tales of the empire',
+            'tales of the underworld',
+            'forces of destiny',
+            'detours'
         ],
+        standaloneAliases: [
+            'the mandalorian',
+            'andor',
+            'ahsoka',
+            'obi wan kenobi',
+            'the book of boba fett',
+            'the acolyte'
+        ],
+        standaloneAliasMediaTypes: {
+            'the mandalorian': ['tv'],
+            'andor': ['tv'],
+            'ahsoka': ['tv'],
+            'obi wan kenobi': ['tv'],
+            'the book of boba fett': ['tv'],
+            'the acolyte': ['tv']
+        },
         excludedTitlePatterns: [
             /^phineas and ferb /,
-            /^lego /,
             /^robot chicken /,
             /^family guy /,
-            /^disney gallery /
+            /^disney gallery /,
+            /^icons unearthed /,
+            /^saving /,
+            /^battle /,
+            /^wccw /,
+            /^pwusa /,
+            /^the making of /,
+            / spoof/,
+            / greatest moments/,
+            / heroes and villains/,
+            / characters of /
         ],
         minSignalCategories: 2,
         minimumScore: 75
@@ -490,6 +524,12 @@ function normalizeSearchText(text) {
 function tokenizeSearchText(text) {
     const normalized = normalizeSearchText(text);
     return normalized ? normalized.split(' ').filter(Boolean) : [];
+}
+
+function getFranchiseTermsForQuery(query) {
+    const queryNorm = normalizeSearchText(query);
+    const compactQuery = queryNorm.replace(/\s+/g, '');
+    return FRANCHISE_KEYWORDS[queryNorm] || FRANCHISE_KEYWORDS[compactQuery] || [];
 }
 
 function escapeRegExp(text) {
@@ -530,6 +570,7 @@ function scoreCollectionMatch(collectionName, query, franchiseTerms = []) {
 function filterAndRankCollections(collections, query, franchiseTerms = []) {
     const queryNorm = normalizeSearchText(query);
     const queryTokens = tokenizeSearchText(query);
+    const definition = getFranchiseDefinition(query, franchiseTerms);
     const termList = [query, ...franchiseTerms]
         .map(term => normalizeSearchText(term))
         .filter(Boolean);
@@ -542,6 +583,10 @@ function filterAndRankCollections(collections, query, franchiseTerms = []) {
     });
 
     const filtered = scored.filter(item => {
+        if (definition.hasRule && definition.excludedTitlePatterns.some(pattern => pattern.test(item.nameNorm))) {
+            return false;
+        }
+
         const hasBasicMatch = termList.some(term => item.nameNorm.includes(term));
         const hasOverlap = item.overlapRatio >= 0.5 && queryTokens.length >= 2;
         const hasStrongScore = item.score >= 60;
@@ -684,23 +729,69 @@ function getDistinctiveFranchiseTerms(query, franchiseTerms = []) {
 
 function getFranchiseDefinition(query, franchiseTerms = []) {
     const normalizedQuery = normalizeSearchText(query);
-    const rule = FRANCHISE_RULES[normalizedQuery];
+    const compactQuery = normalizedQuery.replace(/\s+/g, '');
+    const ruleKey = FRANCHISE_RULES[normalizedQuery]
+        ? normalizedQuery
+        : Object.keys(FRANCHISE_RULES).find(key => key.replace(/\s+/g, '') === compactQuery);
+    const rule = ruleKey ? FRANCHISE_RULES[ruleKey] : null;
     const aliases = rule?.aliases?.length
         ? [...new Set(rule.aliases.map(alias => normalizeSearchText(alias)).filter(Boolean))]
         : getDistinctiveFranchiseTerms('', franchiseTerms);
 
     return {
-        query: normalizedQuery,
+        query: ruleKey || normalizedQuery,
         aliases,
+        standaloneAliases: rule?.standaloneAliases?.length
+            ? [...new Set(rule.standaloneAliases.map(alias => normalizeSearchText(alias)).filter(Boolean))]
+            : [],
+        standaloneAliasMediaTypes: Object.entries(rule?.standaloneAliasMediaTypes || {}).reduce((aliases, [alias, mediaTypes]) => {
+            aliases[normalizeSearchText(alias)] = mediaTypes;
+            return aliases;
+        }, {}),
         excludedTitlePatterns: rule?.excludedTitlePatterns || [],
         minSignalCategories: rule?.minSignalCategories || 2,
-        minimumScore: rule?.minimumScore || 80
+        minimumScore: rule?.minimumScore || 80,
+        hasRule: Boolean(rule)
     };
 }
 
 function isExcludedFromFranchise(item, definition) {
     const titleNorm = normalizeSearchText(getMediaTitle(item));
     return definition.excludedTitlePatterns.some(pattern => pattern.test(titleNorm));
+}
+
+function getFranchiseTitleMatchStrength(item, definition) {
+    const titleNorm = normalizeSearchText(getMediaTitle(item));
+    if (!titleNorm || isExcludedFromFranchise(item, definition)) return null;
+
+    const mediaType = getMediaType(item);
+    const titleAliases = [definition.query, ...definition.aliases]
+        .filter(Boolean)
+        .sort((a, b) => b.length - a.length);
+
+    for (const alias of titleAliases) {
+        const aliasTokens = tokenizeSearchText(alias);
+        const isStandaloneAlias = definition.standaloneAliases.includes(alias);
+        const standaloneMediaTypes = definition.standaloneAliasMediaTypes[alias] || [];
+
+        if (titleNorm === alias) {
+            if (isStandaloneAlias) {
+                return standaloneMediaTypes.length === 0 || standaloneMediaTypes.includes(mediaType) ? 'exact' : null;
+            }
+
+            if (alias === definition.query || titleNorm.includes(definition.query)) return 'exact';
+            return null;
+        }
+        if (isStandaloneAlias) continue;
+
+        if (aliasTokens.length >= 2 && titleNorm.startsWith(`${alias} `)) return 'prefix';
+
+        if (aliasTokens.length >= 2 && titleNorm.includes(alias)) {
+            return 'contains';
+        }
+    }
+
+    return null;
 }
 
 function matchesDistinctiveFranchiseTerms(item, query, franchiseTerms = []) {
@@ -737,6 +828,10 @@ function matchesDistinctiveFranchiseTerms(item, query, franchiseTerms = []) {
         const overlap = termTokens.filter(token => titleTokens.includes(token)).length;
         return overlap >= Math.ceil(termTokens.length * 0.75);
     });
+
+    if (definition.hasRule) {
+        return queryMatches || Boolean(getFranchiseTitleMatchStrength(item, definition));
+    }
 
     return queryMatches || synonymMatches;
 }
@@ -784,7 +879,9 @@ async function buildSmartFranchiseResults({
         const itemType = getMediaType(item, mediaTypeFilter);
         if (!mediaTypesToUse.includes(itemType)) return;
         if (!matchesDistinctiveFranchiseTerms(item, query, franchiseTerms)) return;
-        addSignalCandidate(candidateMap, item, itemType, 55, 'Direct search match', 'direct');
+        const titleMatchStrength = getFranchiseTitleMatchStrength(item, definition);
+        const score = titleMatchStrength === 'exact' ? 78 : titleMatchStrength === 'prefix' ? 70 : 60;
+        addSignalCandidate(candidateMap, item, itemType, score, 'Direct franchise title match', 'direct');
     });
 
     // 2) Expansion from known franchise terms.
@@ -793,7 +890,11 @@ async function buildSmartFranchiseResults({
             const itemType = getMediaType(item, mediaTypeFilter);
             if (!mediaTypesToUse.includes(itemType)) return;
             if (!matchesDistinctiveFranchiseTerms(item, query, franchiseTerms)) return;
-            addSignalCandidate(candidateMap, item, itemType, 30, 'Franchise term search', 'term');
+            const titleMatchStrength = getFranchiseTitleMatchStrength(item, definition);
+            const score = titleMatchStrength === 'exact' ? 76 : titleMatchStrength === 'prefix' ? 68 : 34;
+            const category = titleMatchStrength === 'exact' || titleMatchStrength === 'prefix' ? 'alias' : 'term';
+            const reason = category === 'alias' ? 'Known franchise title match' : 'Franchise term search';
+            addSignalCandidate(candidateMap, item, itemType, score, reason, category);
         });
     });
 
@@ -884,12 +985,14 @@ async function buildSmartFranchiseResults({
             const categories = new Set(item._franchiseCategories || []);
             const hasCollectionEvidence = categories.has('collection');
             const hasDirectEvidence = categories.has('direct');
+            const hasAliasEvidence = categories.has('alias');
             const hasEnoughSignals = (item._franchiseSignalCount || 0) >= definition.minSignalCategories;
             const isStrongEnough = item._franchiseScore >= definition.minimumScore;
 
             return hasStrongTitleMatch && (
                 hasCollectionEvidence ||
                 hasDirectEvidence ||
+                hasAliasEvidence ||
                 (hasEnoughSignals && isStrongEnough)
             );
         })
@@ -898,6 +1001,38 @@ async function buildSmartFranchiseResults({
             return (b.popularity || 0) - (a.popularity || 0);
         })
         .slice(0, 40);
+}
+
+function mergeSearchResultSets(...resultSets) {
+    const merged = [];
+    const seen = new Set();
+
+    resultSets.flat().forEach(item => {
+        if (!item || !item.id || item.media_type === 'person') return;
+        const mediaType = item.media_type || item.mediaType || 'movie';
+        const key = `${mediaType}-${item.id}`;
+        if (seen.has(key)) return;
+
+        seen.add(key);
+        merged.push({
+            ...item,
+            media_type: mediaType,
+            mediaType
+        });
+    });
+
+    return merged;
+}
+
+function sortFranchisePrimaryResults(a, b) {
+    const scoreDiff = (b._franchiseScore || 0) - (a._franchiseScore || 0);
+    if (scoreDiff !== 0) return scoreDiff;
+
+    const dateA = getReleaseDateForMedia(a, a.media_type || a.mediaType || 'movie') || '';
+    const dateB = getReleaseDateForMedia(b, b.media_type || b.mediaType || 'movie') || '';
+    if (dateA && dateB && dateA !== dateB) return dateA.localeCompare(dateB);
+
+    return (b.popularity || 0) - (a.popularity || 0);
 }
 
 async function searchMovies() {
@@ -919,9 +1054,9 @@ async function searchMovies() {
 
     try {
         // Check if query matches a franchise keyword
-        const queryLower = query.toLowerCase();
-        const franchiseTerms = FRANCHISE_KEYWORDS[queryLower] || [];
+        const franchiseTerms = getFranchiseTermsForQuery(query);
         const isFranchiseSearch = franchiseTerms.length > 0;
+        const effectiveMediaTypeFilter = isFranchiseSearch ? 'all' : mediaTypeFilter;
 
         // Build collection search promises - only for movies (TMDB collections are movie-only)
         const shouldSearchCollections = mediaTypeFilter !== 'tv';
@@ -936,8 +1071,13 @@ async function searchMovies() {
             : [];
 
         // Franchise search: broaden search across related terms to build a "smart" franchise list
-        const MAX_FRANCHISE_TERMS = 8;
-        const franchiseSearchTerms = isFranchiseSearch ? franchiseTerms.slice(0, MAX_FRANCHISE_TERMS) : [];
+        const MAX_FRANCHISE_TERMS = 18;
+        const franchiseDefinition = getFranchiseDefinition(query, franchiseTerms);
+        const franchiseSearchTerms = isFranchiseSearch
+            ? [...new Set([...franchiseTerms, ...franchiseDefinition.aliases])]
+                .filter(term => term && term.length >= 4)
+                .slice(0, MAX_FRANCHISE_TERMS)
+            : [];
         const franchisePromises = franchiseSearchTerms.map(term =>
             fetch(`${TMDB_BASE_URL}/search/multi?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(term)}&page=1`)
                 .then(r => r.json())
@@ -991,8 +1131,8 @@ async function searchMovies() {
 
         // Filter results based on media type selection
         let results = allResults.filter(item => {
-            if (mediaTypeFilter === 'movie') return item.media_type === 'movie';
-            if (mediaTypeFilter === 'tv') return item.media_type === 'tv';
+            if (effectiveMediaTypeFilter === 'movie') return item.media_type === 'movie';
+            if (effectiveMediaTypeFilter === 'tv') return item.media_type === 'tv';
             return true;
         });
 
@@ -1008,13 +1148,28 @@ async function searchMovies() {
         // Build confidence-ranked franchise group from multiple TMDB signals.
         const allFranchiseResults = await buildSmartFranchiseResults({
             query,
-            mediaTypeFilter,
+            mediaTypeFilter: effectiveMediaTypeFilter,
             directResults: results,
             franchiseSearchResults,
             collections: allCollections,
             franchiseTerms
         });
-        const shouldShowFranchise = allFranchiseResults.length >= 3;
+
+        if (isFranchiseSearch) {
+            const franchiseKeySet = new Set(allFranchiseResults.map(item => `${item.media_type || item.mediaType}-${item.id}`));
+            const filteredDirectResults = results.filter(item => {
+                const key = `${item.media_type || item.mediaType}-${item.id}`;
+                return franchiseKeySet.has(key) || matchesDistinctiveFranchiseTerms(item, query, franchiseTerms);
+            });
+
+            const primaryFranchiseResults = allFranchiseResults.length > 0 ? allFranchiseResults : filteredDirectResults;
+
+            results = mergeSearchResultSets(primaryFranchiseResults)
+                .filter(item => matchesDistinctiveFranchiseTerms(item, query, franchiseTerms))
+                .sort(sortFranchisePrimaryResults);
+        }
+
+        const shouldShowFranchise = !isFranchiseSearch && allFranchiseResults.length >= 3;
 
         if (results.length > 0 || allCollections.length > 0 || shouldShowFranchise) {
             renderSearchResults(results, mediaTypeFilter, query, allCollections, shouldShowFranchise ? allFranchiseResults : []);
