@@ -6,11 +6,11 @@ A movie and TV discovery tool, personal watchlist, series tracker, and viewing j
 
 ## Find titles in different ways
 
-**Title search** starts fresh across movies and TV shows, without inheriting unrelated Explore filters. It includes upcoming and announced titles by default, so they can be saved before release. Narrow to movies or TV, and turn upcoming titles off when desired. Results use TMDB relevance.
+**Title search** treats the entered title literally and starts fresh across movies and TV shows, without inheriting unrelated Explore filters. It includes upcoming and announced titles by default, so they can be saved before release. Narrow to movies or TV, and turn upcoming titles off when desired. Results use TMDB relevance.
 
 **Explore** combines genre, an inclusive year range, popularity/rating/date ranking, minimum rating, original language, movie runtime, streaming service and region, and movie cast/crew filters. Person lookup shows real people and their known work so users can choose the right actor or filmmaker. Availability includes streaming, rental and purchase listings.
 
-Explicit requests such as `best sci-fi movies since 2010`, `top 50 animated movies since 2000`, or `best TV shows` translate into visible filters. Unsupported wording remains a title search; the app does not invent filters. Incompatible movie-only filters are cleared when switching to TV. Weekly trending uses TMDB's own feed and does not offer service, runtime or person filtering.
+In Explore, explicit requests such as `best sci-fi movies since 2010`, `top 50 animated movies since 2000`, or `best TV shows` translate into visible filters. Unsupported wording remains a title search; the app does not invent filters. Incompatible movie-only filters are cleared when switching to TV. Weekly trending uses TMDB's own feed and does not offer service, runtime or person filtering. Browser Back and Forward restore views and submitted searches.
 
 Highest-rated discovery uses TMDB's global rating order with a visible minimum-vote threshold. Explore shows released titles. Load more continues through subsequent results, retaining order and avoiding duplicates. Hidden titles and the optional Hide watched setting are excluded with backfilling. Partial results and request failures are clearly labeled.
 
@@ -34,7 +34,7 @@ The Watched section offers a chronological **Viewing history**. Insights count v
 
 ## Useful suggestions and details
 
-For you uses watched titles rated at least 7 or explicitly favorited titles. Unrated watches are not automatically treated as positive preferences. Users can choose any saved title as an explicit seed and filter suggestions by movie/TV. More suggestions rotates seeds and continues through recommendation pages. Already-saved and hidden titles are excluded; Not for me is reversible.
+For you uses watched titles rated at least 7 or explicitly favorited titles. Unrated watches are not automatically treated as positive preferences. Users can choose any saved title as an explicit seed and filter suggestions by movie/TV. Suggestions stay in place when navigating between views; Find different suggestions rotates seeds and continues through recommendation pages. Already-saved and hidden titles are excluded; Not for me is reversible.
 
 Title details include synopsis, cast/crew, genres, community rating/vote count, trailer and external links when available, official movie collections, and regional watch options from JustWatch via TMDB.
 

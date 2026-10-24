@@ -840,6 +840,63 @@ test("load more can use the rest of a fetched page without making another reques
   );
 });
 
+test("discovery cursors preserve the original date window across midnight and still reject changed filters", async () => {
+  let currentDate = new Date(2026, 9, 23, 23, 59);
+  const urls = [];
+  const api = client(async (url) => {
+    const u = new URL(url);
+    urls.push(u);
+    const p = Number(u.searchParams.get("page"));
+    return response(page([movie(p)], p, 2, 2));
+  }, { now: () => currentDate });
+  const filters = { limit: 1, yearFrom: "2000" };
+  const first = await api.discover(filters);
+  currentDate = new Date(2026, 9, 24, 0, 1);
+  const next = await api.discover(filters, { cursor: first.nextCursor });
+  assert.deepEqual(next.results.map((item) => item.id), [2]);
+  assert.deepEqual(urls.map((u) => u.searchParams.get("page")), ["1", "2"]);
+  assert.deepEqual(urls.map((u) => u.searchParams.get("primary_release_date.lte")), ["2026-10-23", "2026-10-23"]);
+  await assert.rejects(api.discover({ ...filters, yearFrom: "2010" }, { cursor: first.nextCursor }), /filters changed/);
+  assert.equal(urls.length, 2);
+  await api.discover(filters);
+  assert.equal(urls[2].searchParams.get("primary_release_date.lte"), "2026-10-24");
+});
+
+test("discovery uses one date snapshot for both API parameters and its continuation", async () => {
+  let clockReads = 0;
+  const dates = [];
+  const api = client(async (url) => {
+    const u = new URL(url);
+    dates.push(u.searchParams.get("primary_release_date.lte"));
+    const p = Number(u.searchParams.get("page"));
+    return response(page([movie(p)], p, 2, 2));
+  }, { now: () => new Date(2026, 9, clockReads++ === 0 ? 23 : 24, 0, 0) });
+  const first = await api.discover({ limit: 1 });
+  const next = await api.discover({ limit: 1 }, { cursor: first.nextCursor });
+  assert.deepEqual(next.results.map((item) => item.id), [2]);
+  assert.deepEqual(dates, ["2026-10-23", "2026-10-23"]);
+  assert.equal(clockReads, 1);
+});
+
+test("title-search continuations keep their original local release cutoff after midnight", async () => {
+  let currentDate = new Date(2026, 9, 23, 23, 59);
+  let requests = 0;
+  const api = client(async () => {
+    requests++;
+    return response(page([
+      movie(1), movie(2, { release_date: "2026-10-24" }), movie(3),
+    ]));
+  }, { now: () => currentDate });
+  const filters = { query: "Movie", includeUpcoming: false, limit: 1 };
+  const first = await api.search(filters);
+  currentDate = new Date(2026, 9, 24, 0, 1);
+  const next = await api.search(filters, { cursor: first.nextCursor });
+  assert.deepEqual(next.results.map((item) => item.id), [3]);
+  assert.equal(requests, 1);
+  assert.equal(next.hasMore, false);
+  await assert.rejects(api.search({ ...filters, includeUpcoming: true }, { cursor: first.nextCursor }), /filters changed/);
+});
+
 test("load more resumes after a scan cap or a later-page failure", async () => {
   const calls = [];
   const api = client(

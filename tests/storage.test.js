@@ -1148,3 +1148,68 @@ test("imports calculate the latest known date from merged events and preserve un
   assert.equal(result.watched.find((item) => item.id === 1).logs.length, 3);
   assert.equal(result.watched.find((item) => item.id === 2).watchedDate, "");
 });
+
+test("duplicate legacy watched records preserve their populated viewing through reload and the next save", () => {
+  const original = saved([], [
+    movie(1, { watchedDate: "2020-01-02", rating: 9, notes: "Cinema with family" }),
+    movie(1, { title: "New metadata" }),
+  ]);
+  const storage = new MemoryStorage({ movieTrackerData: original });
+  const store = createLibraryStore(storage);
+  const expected = [{ id: "legacy:movie:1", date: "2020-01-02", rating: 9, notes: "Cinema with family" }];
+  const initial = store.load();
+  assert.equal(initial.watched.length, 1);
+  assert.equal(initial.watched[0].title, "New metadata");
+  assert.equal(initial.watched[0].watchedDate, "2020-01-02");
+  assert.deepEqual(initial.watched[0].logs, expected);
+  assert.deepEqual(store.load().watched[0].logs, expected);
+  assert.equal(storage.getItem("movieTrackerData"), original);
+  assert.equal(storage.writes.length, 0);
+  store.updateItem(1, "movie", { favorite: true });
+  assert.deepEqual(JSON.parse(storage.getItem("movieTrackerData")).watched[0].logs, expected);
+  const reloaded = createLibraryStore(storage).load();
+  assert.equal(reloaded.watched[0].watchedDate, "2020-01-02");
+  assert.deepEqual(reloaded.watched[0].logs, expected);
+  assert.equal(reloaded.watched[0].favorite, true);
+});
+
+test("synthetic duplicate viewings combine missing fields without adding repeat watches", () => {
+  const store = createLibraryStore(new MemoryStorage({ movieTrackerData: saved([], [
+    movie(1, { watchedDate: "2020-01-02", rating: 9, notes: "Original review" }),
+    movie(1, { watchedDate: "2021-02-03" }),
+    movie(1, { title: "Final metadata" }),
+  ]) }));
+  const item = store.load().watched[0];
+  assert.deepEqual(item.logs, [{ id: "legacy:movie:1", date: "2021-02-03", rating: 9, notes: "Original review" }]);
+  assert.equal(item.watchedDate, "2021-02-03");
+});
+
+test("explicit cleared journal entries remain authoritative over synthetic duplicates in either order", () => {
+  const explicit = movie(1, { rating: 0, notes: "", watchedDate: "", logs: [
+    { id: "legacy:movie:1", date: "", rating: 0, notes: "" },
+  ] });
+  const legacy = movie(1, { watchedDate: "2020-01-02", rating: 9, notes: "Older review" });
+  for (const duplicates of [[legacy, explicit, legacy], [explicit, legacy]]) {
+    const store = createLibraryStore(new MemoryStorage({ movieTrackerData: saved([], duplicates) }));
+    const item = store.load().watched[0];
+    assert.deepEqual(item.logs, explicit.logs);
+    assert.equal(item.watchedDate, "");
+  }
+});
+
+test("legacy duplicate repair does not replace a current edited event or cleared main fields during import", () => {
+  const store = createLibraryStore(new MemoryStorage());
+  store.saveItem(movie(1), "watched", { rating: 0, notes: "", watchedDate: "", logs: [
+    { id: "legacy:movie:1", date: "", rating: 0, notes: "Current event edit" },
+  ] });
+  const current = store.getSnapshot().watched[0];
+  store.importData(saved([], [
+    movie(1, { watchedDate: "2020-01-02", rating: 9, notes: "Older review" }),
+    movie(1, { title: "New metadata" }),
+  ]));
+  const item = store.getSnapshot().watched[0];
+  assert.deepEqual(item.logs, current.logs);
+  assert.equal(item.rating, 0);
+  assert.equal(item.notes, "");
+  assert.equal(item.watchedDate, "");
+});

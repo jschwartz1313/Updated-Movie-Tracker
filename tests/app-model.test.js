@@ -77,6 +77,46 @@ test("recognized discovery requests retain explicit browsing controls", () => {
   assert.equal(result.originalLanguage, "en");
 });
 
+test("explicit title search treats real titles that overlap filter words literally", () => {
+  for (const title of ["Popular", "Family", "War", "Comedy", "Western", "Best"]) {
+    const result = planSearch(`  ${title}  `, {
+      literalTitle: true,
+      searchType: "tv",
+      exploreFilters: {
+        mediaType: "movie", genreId: "16", yearFrom: "2000", yearTo: "2010",
+        sort: "rating", minVotes: 5000, minRating: 9, runtimeMax: 90,
+        originalLanguage: "ja", personId: "525", watchProviderId: "8",
+      },
+    });
+    assert.equal(result.mode, "search", title);
+    assert.equal(result.query, title);
+    assert.equal(result.mediaType, "tv");
+    assert.equal(result.recognized, false);
+    assert.equal(result.includeUpcoming, true);
+    assert.equal(result.limit, 30);
+    assert.equal(result.minVotes, 0);
+    assert.equal(result.minRating, 0);
+    for (const field of ["genreId", "yearFrom", "yearTo", "runtimeMax", "originalLanguage", "personId", "watchProviderId"])
+      assert.equal(result[field], "", `${title}: ${field}`);
+  }
+});
+
+test("natural filter phrases parse in Explore and remain literal in explicit title search", () => {
+  const query = "best 25 science fiction movies between 2000 and 2010";
+  const options = { searchType: "all", exploreFilters: { minVotes: 1000 } };
+  const discovery = planSearch(query, options);
+  assert.equal(discovery.mode, "discover");
+  assert.equal(discovery.limit, 25);
+  const literal = planSearch(query, { ...options, literalTitle: true });
+  assert.equal(literal.mode, "search");
+  assert.equal(literal.query, query);
+  assert.equal(literal.mediaType, "all");
+  assert.equal(literal.genreId, "");
+  assert.equal(literal.yearFrom, "");
+  assert.equal(literal.minVotes, 0);
+  assert.equal(literal.limit, 30);
+});
+
 test("blank search resumes structured discovery and clears an old title query", () => {
   const result = planSearch(" ", {
     exploreFilters: {
@@ -92,6 +132,10 @@ test("blank search resumes structured discovery and clears an old title query", 
   assert.equal(result.mediaType, "tv");
   assert.equal(result.genreId, "35");
   assert.equal(result.yearFrom, "2010");
+  assert.deepEqual(planSearch(" ", {
+    literalTitle: true,
+    exploreFilters: { mediaType: "tv", genreId: "35", yearFrom: "2010" },
+  }), result);
 });
 
 test("saved metadata keeps useful canonical details while trimming API payloads and personal records", () => {

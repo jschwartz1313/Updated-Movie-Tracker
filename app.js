@@ -4,15 +4,15 @@ import {
   normalizeFilters,
   describeFilters,
   createMovieClient,
-} from "./lib/discovery.js?v=3.0.0";
-import { createLibraryStore } from "./lib/storage.js?v=3.0.0";
-import { filterLibrary, libraryStats } from "./lib/library.js?v=3.0.0";
+} from "./lib/discovery.js?v=3.0.1";
+import { createLibraryStore } from "./lib/storage.js?v=3.0.1";
+import { filterLibrary, libraryStats } from "./lib/library.js?v=3.0.1";
 import {
   planSearch,
   metadataForStorage,
   recommendationSeeds,
   mergePersonalEdits,
-} from "./lib/app-model.js?v=3.0.0";
+} from "./lib/app-model.js?v=3.0.1";
 
 const $ = (id) => document.getElementById(id);
 const escapeHTML = (value) =>
@@ -89,6 +89,8 @@ const state = {
   resultInfo: null,
   recommendations: [],
   recommendationsReady: false,
+  recommendationContext: "",
+  recommendationsHaveSeeds: false,
   discoveryController: null,
   recommendationController: null,
   detailController: null,
@@ -117,6 +119,8 @@ const recommendationCursors = new Map();
 const seenRecommendations = new Set();
 let providerRequest = 0;
 let peopleRequest = 0;
+let restoringLocation = true;
+let appliedLocation = location.href;
 function savePreferences(patch) {
   preferences = { ...preferences, ...patch };
   try {
@@ -201,11 +205,14 @@ function normalizeItem(item) {
     watchProviders: item["watch/providers"]?.results?.US || item.watchProviders,
   };
 }
-function toast(message, undo = false) {
-  clearTimeout(toastTimer);
+function mountToast() {
   // Native dialogs make outside controls inert. Keep Undo inside the open dialog.
   const host = document.querySelector("dialog[open]") || document.body;
   if ($("toast").parentElement !== host) host.append($("toast"));
+}
+function toast(message, undo = false) {
+  clearTimeout(toastTimer);
+  mountToast();
   $("toast-text").textContent = message;
   $("undo-button").hidden = !undo;
   $("toast").hidden = false;
@@ -271,6 +278,10 @@ function populateGenres(mediaType = "movie", selected = "") {
 }
 function setMode(mode) {
   state.uiMode = mode;
+  $("search-input").placeholder =
+    mode === "search"
+      ? "Enter a movie or TV title"
+      : "Try: top 50 animated movies since 2000";
   $("explore-controls").hidden = mode === "search";
   $("search-controls").hidden = mode !== "search";
   $("explore-controls")
@@ -323,6 +334,7 @@ function syncFilters(f) {
   $("person-query").disabled = noAdvanced || tv;
   $("person-role").disabled = noAdvanced || tv;
   $("min-votes").disabled = f.sort !== "rating";
+  if ($("advanced-filters").open) loadProviderOptions();
 }
 function renderActiveFilters() {
   const f = state.filters;
@@ -360,13 +372,17 @@ async function loadProviderOptions() {
     mt = $("media-type-filter").value,
     region = $("watch-region").value,
     key = mt + region;
-  const selected = $("watch-provider").value,
-    selectedName = $("watch-provider").selectedOptions[0]?.textContent;
   try {
     const providers =
       providerCache.get(key) || (await client.watchProviders(mt, { region }));
-    if (request !== providerRequest) return;
+    if (
+      request !== providerRequest ||
+      mt !== $("media-type-filter").value ||
+      region !== $("watch-region").value
+    ) return;
     providerCache.set(key, providers);
+    const selected = $("watch-provider").value,
+      selectedName = $("watch-provider").selectedOptions[0]?.textContent;
     $("watch-provider").innerHTML =
       '<option value="">Any service</option>' +
       providers
@@ -414,11 +430,31 @@ function saveLocation() {
       value !== ""
     )
       params.set(key, value);
-  history.replaceState(
-    null,
-    "",
-    `${location.pathname}${params.size ? "?" + params : ""}#${state.view}`,
-  );
+  const url = `${location.pathname}${params.size ? "?" + params : ""}#${state.view}`;
+  if (url !== location.pathname + location.search + location.hash)
+    history[restoringLocation ? "replaceState" : "pushState"](null, "", url);
+  appliedLocation = location.href;
+}
+function locationFilters() {
+  return normalizeFilters({
+    ...defaults,
+    ...Object.fromEntries(new URLSearchParams(location.search)),
+  });
+}
+function restoreLocation() {
+  if (location.hash === "#main" || location.href === appliedLocation) return;
+  restoringLocation = true;
+  try {
+    const filters = locationFilters();
+    const changed = JSON.stringify(filters) !== JSON.stringify(state.filters);
+    state.filters = filters;
+    syncFilters(filters);
+    $("search-input").value = filters.mode === "search" ? filters.query : "";
+    navigate(location.hash.slice(1) || "discover");
+    if (changed) runDiscovery({ filters });
+  } finally {
+    restoringLocation = false;
+  }
 }
 function resultTitle(f) {
   if (f.mode === "search") return `Results for “${f.query}”`;
@@ -454,11 +490,14 @@ async function runDiscovery({
       filters = planSearch($("search-input").value, {
         exploreFilters: readFilters(),
         searchType: $("search-type").value,
+        literalTitle: state.uiMode === "search",
       });
       if (filters.mode === "search")
         filters.includeUpcoming = $("search-upcoming").checked;
     }
     filters = normalizeFilters(filters);
+    // Parser metadata is not part of a saved search or its pagination identity.
+    filters.recognized = false;
     if (filters.mode === "discover" && filters.mediaType === "tv") {
       filters.personId = "";
       filters.personName = "";
@@ -664,7 +703,10 @@ function navigate(view, { focus = false } = {}) {
   if (view === "stats") renderStats();
   if (view === "recommendations") {
     populateRecommendationSeeds();
-    loadRecommendations();
+    if (recommendationContext() !== state.recommendationContext)
+      resetRecommendations();
+    else if (state.recommendationsReady && state.recommendationsHaveSeeds)
+      renderRecommendationCards();
   }
   saveLocation();
   if (focus) $("main").focus({ preventScroll: true });
@@ -803,7 +845,12 @@ function updateLibrary() {
   if (["watchlist", "watching", "watched"].includes(state.view))
     renderLibrary();
   if (state.view === "stats") renderStats();
-  if (state.view === "recommendations") renderRecommendationCards();
+  if (
+    state.view === "recommendations" &&
+    state.recommendationsReady &&
+    state.recommendationsHaveSeeds
+  )
+    renderRecommendationCards();
   updateHiddenCount();
 }
 async function hydrateSaved(item) {
@@ -973,6 +1020,7 @@ async function openDetails(item, draft = null) {
     cached = detailCache.get(keyOf(item));
   state.detailItem = normalizeItem({ ...item, ...cached });
   if (!$("movie-dialog").open) $("movie-dialog").showModal();
+  mountToast();
   if (cached) {
     renderDetail(cached);
     return;
@@ -1019,10 +1067,10 @@ async function openDetails(item, draft = null) {
         error.message;
   }
 }
-function needsNewLog() {
+function needsNewLog(status = $("record-status")?.value) {
   const saved = getSaved(state.detailItem);
   return (
-    $("record-status")?.value === "watched" &&
+    status === "watched" &&
     (!!state.detailDraft?.newLog ||
       ((!saved || getStatus(saved) !== "watched") &&
         !(saved?.logs || []).length))
@@ -1053,8 +1101,9 @@ function saveRecord(event) {
       dirtyFields.has("record-status") ||
       !!state.detailDraft?.status;
   const status = statusEdited ? chosen : trackedState(item) || chosen,
-    date = $("record-date").value;
-  if (needsNewLog() && date && date > today()) {
+    date = $("record-date").value,
+    newLog = needsNewLog(status);
+  if (newLog && date && date > today()) {
     $("record-message").textContent =
       "Choose a date up to today, or leave it blank if unknown.";
     return;
@@ -1148,7 +1197,7 @@ function saveRecord(event) {
     )
       return;
     const before = JSON.stringify(store.getSnapshot());
-    if (needsNewLog()) {
+    if (newLog) {
       if (existing && !dirtyFields.has("record-rating"))
         changes.rating = current.rating || 0;
       store.logWatch(
@@ -1191,6 +1240,7 @@ function closeDialog(dialog) {
   }
   if (dialog.contains($("toast"))) document.body.append($("toast"));
   dialog.close();
+  mountToast();
   if (document.activeElement === document.body && key)
     document.querySelector(`article[data-key="${key}"] .title-button`)?.focus();
   return true;
@@ -1213,6 +1263,7 @@ async function openLogEditor(item, logId) {
   dirtyFields = new Set();
   const logBase = JSON.parse(JSON.stringify(log));
   if (!$("movie-dialog").open) $("movie-dialog").showModal();
+  mountToast();
   $("detail-content").innerHTML =
     `<h2 id="detail-title">Edit a viewing</h2><p class="intro">${escapeHTML(titleOf(item))}</p><form id="edit-log-form" class="record-panel"><div class="record-fields"><label>Date watched <span class="muted">· optional</span><input id="edit-log-date" type="date" max="${today()}" value="${escapeHTML(log.date || "")}"></label><label>Rating for this viewing<select id="edit-log-rating">${ratingOptions(log.rating)}</select></label></div><label class="record-notes">Viewing notes<textarea id="edit-log-notes" maxlength="20000">${escapeHTML(log.notes || "")}</textarea></label><div class="record-footer"><button type="button" class="text-btn danger" data-action="remove-log" data-log-id="${escapeHTML(log.id)}">Delete this viewing</button><div class="inline-controls"><button type="button" class="btn secondary" data-action="back-detail">Cancel</button><button class="btn primary" type="submit">Save viewing</button></div></div><div id="record-message" class="form-error" role="alert"></div></form>`;
   $("edit-log-form").addEventListener("input", markDirty);
@@ -1378,26 +1429,45 @@ function populateRecommendationSeeds() {
     ? selected
     : "";
 }
+function recommendationLibrary() {
+  const type = $("rec-type").value;
+  return {
+    watchlist: library.watchlist.filter(
+      (x) => type === "all" || typeOf(x) === type,
+    ),
+    watched: library.watched.filter(
+      (x) => type === "all" || typeOf(x) === type,
+    ),
+  };
+}
+function recommendationContext() {
+  return JSON.stringify([
+    $("rec-type").value,
+    $("rec-seed").value,
+    recommendationSeeds(recommendationLibrary(), {
+      seedKey: $("rec-seed").value,
+      limit: allRecords().length,
+    })
+      .map(keyOf)
+      .sort(),
+  ]);
+}
 async function loadRecommendations() {
   state.recommendationController?.abort();
   state.recommendationsReady = false;
+  state.recommendationContext = recommendationContext();
   const controller = new AbortController();
   state.recommendationController = controller;
   const type = $("rec-type").value,
-    filtered = {
-      watchlist: library.watchlist.filter(
-        (x) => type === "all" || typeOf(x) === type,
-      ),
-      watched: library.watched.filter(
-        (x) => type === "all" || typeOf(x) === type,
-      ),
-    };
+    filtered = recommendationLibrary();
   const seeds = recommendationSeeds(filtered, {
     seedKey: $("rec-seed").value,
     offset: state.recOffset,
     limit: 4,
   });
+  state.recommendationsHaveSeeds = seeds.length > 0;
   if (!seeds.length) {
+    state.recommendationsReady = true;
     state.recommendations = [];
     $("recommendations-message").innerHTML = empty(
       "Start with something you love.",
@@ -1545,6 +1615,7 @@ function openData() {
   updateHiddenCount();
   $("import-message").textContent = "";
   $("data-dialog").showModal();
+  mountToast();
 }
 function exportData() {
   try {
@@ -1688,12 +1759,10 @@ $("media-type-filter").addEventListener("change", () => {
   populateGenres($("media-type-filter").value);
   $("watch-provider").value = "";
   changeExplore();
-  if ($("advanced-filters").open) loadProviderOptions();
 });
 $("watch-region").addEventListener("change", () => {
   savePreferences({ watchRegion: $("watch-region").value });
   $("watch-provider").value = "";
-  loadProviderOptions();
   changeExplore();
 });
 $("advanced-filters").addEventListener("toggle", () => {
@@ -1843,8 +1912,11 @@ window.addEventListener("beforeunload", (event) => {
     event.returnValue = "";
   }
 });
-window.addEventListener("hashchange", () => {
-  if (location.hash !== "#main") navigate(location.hash.slice(1) || "discover");
+window.addEventListener("hashchange", restoreLocation);
+window.addEventListener("popstate", restoreLocation);
+document.querySelector(".brand").addEventListener("click", (event) => {
+  event.preventDefault();
+  navigate("discover", { focus: true });
 });
 window.addEventListener("storage", (event) => {
   if (
@@ -2081,18 +2153,16 @@ try {
     ? preferences.libraryDisplay
     : "grid";
   $("hide-watched").checked = !!preferences.hideWatched;
-  const params = Object.fromEntries(new URLSearchParams(location.search));
-  state.filters = normalizeFilters({
-    ...defaults,
-    watchRegion: preferences.watchRegion || "US",
-    ...params,
-  });
+  state.filters = locationFilters();
+  if (!location.search && !location.hash)
+    state.filters.watchRegion = preferences.watchRegion || "US";
   syncFilters(state.filters);
   $("search-input").value =
     state.filters.mode === "search" ? state.filters.query : "";
   updateLibrary();
   navigate(location.hash.slice(1) || "discover");
   runDiscovery({ filters: state.filters });
+  restoringLocation = false;
 } catch (error) {
   reportStorageWarning(
     error.message ||
