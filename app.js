@@ -6,6 +6,13 @@ import {
   createMovieClient,
 } from "./lib/discovery.js";
 import { createLibraryStore } from "./lib/storage.js";
+import { filterLibrary, libraryStats } from "./lib/library.js";
+import {
+  planSearch,
+  metadataForStorage,
+  recommendationSeeds,
+  mergePersonalEdits,
+} from "./lib/app-model.js";
 
 const $ = (id) => document.getElementById(id);
 const escapeHTML = (value) =>
@@ -30,6 +37,7 @@ const today = () => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 };
 const number = (n) => Number(n || 0).toLocaleString();
+const plural = (n, word) => `${number(n)} ${word}${n === 1 ? "" : "s"}`;
 const defaults = {
   mode: "discover",
   query: "",
@@ -40,6 +48,17 @@ const defaults = {
   sort: "popular",
   minVotes: 500,
   limit: 50,
+  runtimeMin: "",
+  runtimeMax: "",
+  minRating: 0,
+  originalLanguage: "",
+  watchProviderId: "",
+  watchProviderName: "",
+  watchRegion: "US",
+  personId: "",
+  personName: "",
+  personRole: "cast",
+  includeUpcoming: false,
 };
 const client = createMovieClient();
 let storage;
@@ -60,6 +79,12 @@ let library = { watchlist: [], watched: [], hiddenItems: [] };
 const state = {
   view: "discover",
   filters: { ...defaults },
+  exploreFilters: { ...defaults },
+  uiMode: "discover",
+  display: "grid",
+  detailDraft: null,
+  recOffset: 0,
+  selectedPerson: null,
   results: [],
   resultInfo: null,
   recommendations: [],
@@ -77,6 +102,44 @@ const itemCache = new Map();
 const detailCache = new Map();
 let toastTimer;
 let recordDirty = false;
+let dirtyFields = new Set();
+let draftBase = null;
+let draftBaseStatus = "";
+let preferences = {};
+try {
+  preferences =
+    JSON.parse(storage.getItem("movieTrackerPreferences") || "{}") || {};
+} catch {}
+const pendingMetadata = new Set();
+const providerCache = new Map();
+const peopleCache = new Map();
+const recommendationCursors = new Map();
+const seenRecommendations = new Set();
+let providerRequest = 0;
+let peopleRequest = 0;
+function savePreferences(patch) {
+  preferences = { ...preferences, ...patch };
+  try {
+    storage.setItem("movieTrackerPreferences", JSON.stringify(preferences));
+  } catch {}
+}
+function allRecords() {
+  return [...library.watchlist, ...library.watched];
+}
+function hasHistory(item) {
+  const saved = getSaved(item) || item;
+  return (saved.logs || []).length > 0 || getStatus(saved) === "watched";
+}
+function trackedState(item) {
+  const saved = getSaved(item);
+  if (!saved) return "";
+  if (getStatus(saved) === "watched") return "watched";
+  return typeOf(saved) === "tv" &&
+    saved.progress?.status &&
+    saved.progress.status !== "planned"
+    ? saved.progress.status
+    : "watchlist";
+}
 
 function getSaved(item) {
   const key = keyOf(item);
@@ -140,6 +203,9 @@ function normalizeItem(item) {
 }
 function toast(message, undo = false) {
   clearTimeout(toastTimer);
+  // Native dialogs make outside controls inert. Keep Undo inside the open dialog.
+  const host = document.querySelector("dialog[open]") || document.body;
+  if ($("toast").parentElement !== host) host.append($("toast"));
   $("toast-text").textContent = message;
   $("undo-button").hidden = !undo;
   $("toast").hidden = false;
@@ -156,8 +222,9 @@ function reportStorageWarning(message = "") {
 }
 function safeMutation(action, message, undo = true) {
   try {
+    const before = JSON.stringify(store.getSnapshot());
     action();
-    toast(message, undo);
+    toast(message, undo && before !== JSON.stringify(store.getSnapshot()));
     return true;
   } catch (error) {
     toast(error.message);
@@ -166,8 +233,8 @@ function safeMutation(action, message, undo = true) {
 }
 function readFilters() {
   return normalizeFilters({
-    mode: state.filters.mode,
-    query: state.filters.query,
+    mode: "discover",
+    query: "",
     mediaType: $("media-type-filter").value,
     genreId: $("genre-filter").value,
     yearFrom: $("year-from").value,
@@ -175,25 +242,56 @@ function readFilters() {
     sort: $("sort-filter").value,
     minVotes: Number($("min-votes").value),
     limit: Number($("result-limit").value),
+    minRating: Number($("min-rating").value),
+    runtimeMax: $("runtime-max").value || "",
+    originalLanguage: $("original-language").value,
+    watchRegion: $("watch-region").value,
+    watchProviderId: $("watch-provider").value,
+    watchProviderName:
+      $("watch-provider").selectedOptions[0]?.textContent || "",
+    personId: state.selectedPerson?.id || "",
+    personName: state.selectedPerson?.name || "",
+    personRole: $("person-role").value,
   });
 }
 function setSelect(id, value, label = value) {
   const el = $(id);
-  if (![...el.options].some((o) => o.value === String(value)))
-    el.add(new Option(String(label), String(value)));
-  el.value = String(value);
+  const normalized = value === undefined || value === null ? "" : String(value);
+  if (![...el.options].some((o) => o.value === normalized))
+    el.add(new Option(String(label), normalized));
+  el.value = normalized;
 }
 function populateGenres(mediaType = "movie", selected = "") {
   $("genre-filter").innerHTML =
     '<option value="">All genres</option>' +
     (GENRES[mediaType] || [])
-      .map(
-        (g) => `<option value="${Number(g.id)}">${escapeHTML(g.name)}</option>`,
-      )
+      .map((g) => `<option value="${g.id}">${escapeHTML(g.name)}</option>`)
       .join("");
   $("genre-filter").value = selected;
 }
+function setMode(mode) {
+  state.uiMode = mode;
+  $("explore-controls").hidden = mode === "search";
+  $("search-controls").hidden = mode !== "search";
+  $("explore-controls")
+    .querySelectorAll("input,select,button")
+    .forEach((el) => {
+      el.disabled = mode === "search";
+    });
+  document
+    .querySelectorAll("[data-mode]")
+    .forEach((b) =>
+      b.setAttribute("aria-pressed", String(b.dataset.mode === mode)),
+    );
+}
 function syncFilters(f) {
+  setMode(f.mode);
+  if (f.mode === "search") {
+    $("search-type").value = f.mediaType;
+    $("search-upcoming").checked = f.includeUpcoming;
+    return;
+  }
+  state.exploreFilters = { ...f };
   $("media-type-filter").value = f.mediaType;
   populateGenres(f.mediaType, f.genreId);
   $("year-from").value = f.yearFrom || "";
@@ -201,12 +299,110 @@ function syncFilters(f) {
   $("sort-filter").value = f.sort;
   setSelect("min-votes", f.minVotes, `${number(f.minVotes)}+ votes`);
   setSelect("result-limit", f.limit, `${f.limit} titles`);
-  $("sort-filter").disabled = f.mode === "search";
-  $("min-votes").disabled = f.mode === "search" || f.sort !== "rating";
-  $("filter-help").textContent =
-    f.mode === "search"
-      ? "Title results use TMDB relevance, your type, genre and date filters. Clear the search to return to ranked discovery."
-      : "Ratings are TMDB community scores. Minimum votes applies to highest-rated rankings. Released titles only.";
+  setSelect("min-rating", f.minRating, `${f.minRating}+`);
+  setSelect("runtime-max", f.runtimeMax || "0", `${f.runtimeMax} minutes`);
+  setSelect("original-language", f.originalLanguage || "");
+  setSelect("watch-region", f.watchRegion);
+  setSelect(
+    "watch-provider",
+    f.watchProviderId || "",
+    f.watchProviderName || f.watchProviderId || "Any service",
+  );
+  $("person-role").value = f.personRole;
+  state.selectedPerson = f.personId
+    ? { id: f.personId, name: f.personName || "Selected person" }
+    : null;
+  $("selected-person").innerHTML = state.selectedPerson
+    ? `<span class="filter-chip">${escapeHTML(state.selectedPerson.name)} <button type="button" data-action="clear-person" aria-label="Remove person filter">×</button></span>`
+    : "";
+  const noAdvanced = f.sort === "trending",
+    tv = f.mediaType === "tv";
+  $("runtime-max").disabled = noAdvanced || tv;
+  $("watch-provider").disabled = noAdvanced;
+  $("find-person").disabled = noAdvanced || tv;
+  $("person-query").disabled = noAdvanced || tv;
+  $("person-role").disabled = noAdvanced || tv;
+  $("min-votes").disabled = f.sort !== "rating";
+}
+function renderActiveFilters() {
+  const f = state.filters;
+  if (f.mode === "search") {
+    $("active-filters").innerHTML = "";
+    return;
+  }
+  const genre = (GENRES[f.mediaType] || []).find(
+    (g) => String(g.id) === String(f.genreId),
+  )?.name;
+  const chips = [];
+  if (genre) chips.push(["genreId", genre]);
+  if (f.yearFrom || f.yearTo)
+    chips.push(["years", `${f.yearFrom || "Any year"}–${f.yearTo || "today"}`]);
+  if (f.minRating) chips.push(["minRating", `TMDB ${f.minRating}+`]);
+  if (f.runtimeMax) chips.push(["runtimeMax", `Under ${f.runtimeMax} min`]);
+  if (f.originalLanguage)
+    chips.push(["originalLanguage", f.originalLanguage.toUpperCase()]);
+  if (f.watchProviderId)
+    chips.push(["watchProviderId", f.watchProviderName || "Selected service"]);
+  if (f.personId)
+    chips.push([
+      "personId",
+      `${f.personRole === "cast" ? "Cast" : "Crew"}: ${f.personName}`,
+    ]);
+  $("active-filters").innerHTML = chips
+    .map(
+      ([key, label]) =>
+        `<button class="filter-chip" data-clear-filter="${key}">${escapeHTML(label)} <span aria-hidden="true">×</span><span class="visually-hidden">Remove filter</span></button>`,
+    )
+    .join("");
+}
+async function loadProviderOptions() {
+  const request = ++providerRequest,
+    mt = $("media-type-filter").value,
+    region = $("watch-region").value,
+    key = mt + region;
+  const selected = $("watch-provider").value,
+    selectedName = $("watch-provider").selectedOptions[0]?.textContent;
+  try {
+    const providers =
+      providerCache.get(key) || (await client.watchProviders(mt, { region }));
+    if (request !== providerRequest) return;
+    providerCache.set(key, providers);
+    $("watch-provider").innerHTML =
+      '<option value="">Any service</option>' +
+      providers
+        .map(
+          (p) =>
+            `<option value="${Number(p.provider_id)}">${escapeHTML(p.provider_name)}</option>`,
+        )
+        .join("");
+    setSelect("watch-provider", selected, selectedName);
+  } catch (error) {
+    if (request === providerRequest)
+      toast("Service list could not load. " + error.message);
+  }
+}
+async function findPerson() {
+  const query = $("person-query").value.trim();
+  if (!query) return;
+  const request = ++peopleRequest;
+  $("person-results").textContent = "Finding people…";
+  try {
+    const data = await client.people(query);
+    if (request !== peopleRequest) return;
+    (data.results || []).forEach((p) => peopleCache.set(String(p.id), p));
+    $("person-results").innerHTML =
+      (data.results || [])
+        .slice(0, 8)
+        .map(
+          (p) =>
+            `<button type="button" class="person-option" data-person-id="${Number(p.id)}"><strong>${escapeHTML(p.name)}</strong><span>${escapeHTML(p.known_for_department || "")}${p.known_for?.length ? " · " + escapeHTML(p.known_for.slice(0, 2).map(titleOf).join(", ")) : ""}</span></button>`,
+        )
+        .join("") ||
+      '<p class="small muted">No matching people. Try a fuller name.</p>';
+  } catch (error) {
+    if (request === peopleRequest)
+      $("person-results").textContent = error.message;
+  }
 }
 function saveLocation() {
   const f = state.filters;
@@ -232,26 +428,66 @@ function resultTitle(f) {
   const media = f.mediaType === "tv" ? "TV shows" : "movies";
   return `${{ rating: `Top ${f.limit}`, popular: "Popular", newest: "Newest", trending: "Trending" }[f.sort] || "Explore"} ${genre ? genre.toLowerCase() + " " : ""}${media}${f.yearFrom ? ` · ${f.yearFrom}${f.yearTo && f.yearTo !== f.yearFrom ? "–" + f.yearTo : f.yearTo === f.yearFrom ? "" : " onward"}` : f.yearTo ? " · through " + f.yearTo : ""}`;
 }
-async function runDiscovery({ parse = false } = {}) {
+async function runDiscovery({
+  parse = false,
+  append = false,
+  filters: submitted,
+} = {}) {
+  const cursor = append ? state.resultInfo?.nextCursor : null;
+  if (append && !cursor) return;
   state.discoveryController?.abort();
   const controller = new AbortController();
   state.discoveryController = controller;
   try {
-    let filters = readFilters();
+    let filters =
+      submitted ||
+      (append
+        ? state.filters
+        : state.uiMode === "search" && state.filters.mode === "search"
+          ? {
+              ...state.filters,
+              mediaType: $("search-type").value,
+              includeUpcoming: $("search-upcoming").checked,
+            }
+          : readFilters());
     if (parse) {
-      const input = $("search-input").value.trim();
-      filters = input
-        ? parseDiscoveryQuery(input, filters)
-        : { ...filters, mode: "discover", query: "" };
-      state.queryRecognized = Boolean(filters.recognized);
+      filters = planSearch($("search-input").value, {
+        exploreFilters: readFilters(),
+        searchType: $("search-type").value,
+      });
+      if (filters.mode === "search")
+        filters.includeUpcoming = $("search-upcoming").checked;
     }
     filters = normalizeFilters(filters);
+    if (filters.mode === "discover" && filters.mediaType === "tv") {
+      filters.personId = "";
+      filters.personName = "";
+      filters.runtimeMin = "";
+      filters.runtimeMax = "";
+    }
+    if (filters.mode === "discover" && filters.sort === "trending") {
+      filters.personId = "";
+      filters.personName = "";
+      filters.runtimeMin = "";
+      filters.runtimeMax = "";
+      filters.watchProviderId = "";
+      filters.watchProviderName = "";
+    }
+    if (filters.mode === "search" && !filters.query) {
+      clearTitleSearch(filters);
+      return;
+    }
     state.filters = filters;
     syncFilters(filters);
     saveLocation();
+    renderActiveFilters();
     state.busy = true;
-    state.results = [];
-    state.resultInfo = null;
+    if (!append) {
+      state.results = [];
+      state.resultInfo = null;
+      $("discover-grid").innerHTML =
+        '<div class="skeleton" aria-hidden="true"></div>'.repeat(5);
+    }
     $("results-title").textContent = resultTitle(filters);
     $("results-kicker").textContent =
       filters.mode === "search"
@@ -259,23 +495,33 @@ async function runDiscovery({ parse = false } = {}) {
         : filters.sort === "rating"
           ? "COMMUNITY FAVORITES"
           : "THE NEXT WATCH";
-    $("results-count").textContent = "Finding titles…";
+    $("results-count").textContent = append
+      ? `${state.results.length} shown · loading more…`
+      : "Finding titles…";
     $("query-summary").hidden = false;
     $("query-summary").textContent = describeFilters(filters);
     $("discover-message").innerHTML =
-      '<div class="loading" role="status"><span class="spinner" aria-hidden="true"></span>Searching the catalog…</div>';
+      '<div class="loading" role="status"><span class="spinner" aria-hidden="true"></span>' +
+      (append ? "Loading more titles…" : "Searching the catalog…") +
+      "</div>";
     $("discover-grid").setAttribute("aria-busy", "true");
-    $("discover-grid").innerHTML =
-      '<div class="skeleton" aria-hidden="true"></div>'.repeat(5);
+    $("load-more").disabled = true;
+    const exclude = [
+      ...hiddenKeys(),
+      ...($("hide-watched").checked
+        ? allRecords().filter(hasHistory).map(keyOf)
+        : []),
+    ].map((k) => k.replace("-", ":"));
     const data = await client[
       filters.mode === "search" ? "search" : "discover"
     ](filters, {
       signal: controller.signal,
-      excludeKeys: hiddenKeys().map((key) => key.replace("-", ":")),
+      excludeKeys: exclude,
+      ...(cursor ? { cursor } : {}),
     });
     if (controller !== state.discoveryController || controller.signal.aborted)
       return;
-    state.results = data.results;
+    state.results = append ? [...state.results, ...data.results] : data.results;
     state.resultInfo = data;
     state.busy = false;
     renderDiscovery();
@@ -284,33 +530,41 @@ async function runDiscovery({ parse = false } = {}) {
       return;
     state.busy = false;
     $("discover-grid").removeAttribute("aria-busy");
-    $("discover-grid").innerHTML = "";
-    $("results-count").textContent = "Search needs attention";
+    $("load-more").disabled = false;
+    if (!append) $("discover-grid").innerHTML = "";
+    $("results-count").textContent = append
+      ? `${state.results.length} shown`
+      : "Search needs attention";
     $("discover-message").innerHTML =
-      `<div class="notice warning" role="alert">${escapeHTML(error.message || "The catalog could not be reached. Please try again.")} <button class="text-btn" data-action="retry-discovery">Try again</button></div>`;
+      `<div class="notice warning" role="alert">${escapeHTML(error.message || "The catalog could not be reached.")} <button class="text-btn" data-action="${append ? "load-more" : "retry-discovery"}">Try again</button></div>`;
   }
 }
 function renderDiscovery() {
   if (state.busy) return;
   $("discover-grid").removeAttribute("aria-busy");
-  const visible = state.results.filter((x) => !hiddenKeys().includes(keyOf(x)));
+  const visible = state.results.filter(
+    (x) =>
+      !hiddenKeys().includes(keyOf(x)) &&
+      (!$("hide-watched").checked || !hasHistory(x)),
+  );
   const info = state.resultInfo;
   $("results-count").textContent = info
     ? `${visible.length} shown${info.totalResultsExact && info.totalResults > visible.length ? " of " + number(info.totalResults) : ""}`
     : "";
   $("discover-message").innerHTML = info?.warning
-    ? `<div class="notice warning">${escapeHTML(info.warning)} <button class="text-btn" data-action="retry-discovery">Try again</button></div>`
+    ? `<div class="notice warning">${escapeHTML(info.warning)} <button class="text-btn" data-action="${info.hasMore ? "load-more" : "retry-discovery"}">Try again</button></div>`
     : "";
-  if (state.results.length && visible.length < state.results.length)
-    $("discover-message").innerHTML +=
-      '<div class="notice">Hidden titles are excluded from these results. Restore them in Your data, or increase the result count.</div>';
   renderCards($("discover-grid"), visible, {
     rank: state.filters.sort === "rating" && state.filters.mode !== "search",
   });
+  $("load-more").hidden = !info?.hasMore;
+  $("load-more").disabled = false;
   if (!visible.length)
     $("discover-grid").innerHTML = empty(
       "No titles found.",
-      "Try a wider year range, a different title or fewer filters.",
+      state.filters.mode === "search"
+        ? "Try a different title or switch between movies and TV."
+        : "Try fewer filters, a wider date range, or a different streaming service.",
       '<button class="btn secondary" data-action="reset-discovery">Reset search</button>',
     );
 }
@@ -319,17 +573,42 @@ function empty(title, text, action = "") {
 }
 function renderCards(container, items, { rank = false } = {}) {
   const fragment = document.createDocumentFragment();
-  items.forEach((item, index) => {
+  for (const [index, item] of items.entries()) {
     itemCache.set(keyOf(item), item);
-    const status = getStatus(item),
-      saved = getSaved(item),
-      key = keyOf(item);
-    const image = imageURL(item.poster_path);
+    const saved = getSaved(item),
+      status = getStatus(item),
+      tracking = trackedState(item),
+      key = keyOf(item),
+      display = saved || item;
+    const image = imageURL(item.poster_path || saved?.poster_path),
+      rating = Number(item.vote_average || saved?.vote_average),
+      tv = typeOf(item) === "tv";
     const card = document.createElement("article");
     card.className = "movie-card";
     card.dataset.key = key;
-    const rating = Number(item.vote_average);
-    card.innerHTML = `<button class="poster-button" data-action="details" data-key="${key}" aria-label="Details for ${escapeHTML(titleOf(item))}">${image ? `<img class="movie-poster" src="${image}" alt="" loading="lazy" decoding="async" width="342" height="513">` : `<span class="poster-placeholder">${escapeHTML(titleOf(item))}</span>`}${rank ? `<span class="rank-badge">${index + 1}</span>` : ""}${status ? '<span class="saved-badge" aria-label="In your collection">✓</span>' : ""}${rating > 0 ? `<span class="score-badge" title="TMDB community rating · ${number(item.vote_count)} votes">★ ${rating.toFixed(1)}</span>` : ""}</button><div class="movie-info"><button class="title-button" data-action="details" data-key="${key}">${escapeHTML(titleOf(item))}</button><div class="movie-meta"><span>${escapeHTML(yearOf(item) || "Year unknown")}${saved?.rating && status === "watched" ? ` · Your rating ${saved.rating}/10` : ""}</span><span class="type">${typeOf(item) === "tv" ? "TV SERIES" : "FILM"}</span></div><div class="card-actions">${status === "watched" ? `<button class="saved" data-action="details" data-key="${key}">✓ Watched · Edit log</button>` : `<button class="${status === "watchlist" ? "saved" : ""}" data-action="${status === "watchlist" ? "details" : "save-watchlist"}" data-key="${key}">${status === "watchlist" ? "✓ Watchlist" : "+ Watchlist"}</button><button data-action="save-watched" data-key="${key}">Log watched</button>`}</div>${item._recommendationReason ? `<p class="card-note">Because you watched ${escapeHTML(item._recommendationReason)}</p>` : ""}</div>`;
+    const progress = saved?.progress,
+      progressText =
+        tv && progress && progress.status !== "planned"
+          ? `${progress.watchedEpisodes}${progress.totalEpisodes ? " / " + progress.totalEpisodes : ""} episodes${progress.currentSeason ? " · S" + progress.currentSeason + (progress.currentEpisode ? " E" + progress.currentEpisode : "") : ""}`
+          : "";
+    const tracked =
+      tracking === "watchlist"
+        ? "Watchlist"
+        : tracking === "watched"
+          ? tv
+            ? "Completed"
+            : "Watched"
+          : tracking
+            ? tracking[0].toUpperCase() + tracking.slice(1)
+            : "";
+    card.innerHTML = `<div class="poster-frame"><button class="poster-button" data-action="details" data-key="${key}" aria-label="Details for ${escapeHTML(titleOf(item))}">${image ? `<img class="movie-poster" src="${image}" alt="" loading="lazy" decoding="async" width="342" height="513">` : `<span class="poster-placeholder">${escapeHTML(titleOf(item))}</span>`}${rank ? `<span class="rank-badge">${index + 1}</span>` : ""}${rating > 0 ? `<span class="score-badge" title="TMDB community rating · ${number(item.vote_count || saved?.vote_count)} votes">★ ${rating.toFixed(1)}</span>` : ""}</button><button class="favorite-button ${saved?.favorite ? "is-favorite" : ""}" data-action="favorite" data-key="${key}" aria-label="${saved?.favorite ? "Remove" : "Add"} ${escapeHTML(titleOf(item))} ${saved?.favorite ? "from" : "to"} favorites" aria-pressed="${!!saved?.favorite}">${saved?.favorite ? "♥" : "♡"}</button></div><div class="movie-info"><button class="title-button" data-action="details" data-key="${key}">${escapeHTML(titleOf(item))}</button><div class="movie-meta"><span>${escapeHTML(yearOf(item) || "Date not announced")}${String(item.release_date || item.first_air_date || "") > today() ? " · Upcoming" : ""}${saved?.rating ? ` · Your rating ${saved.rating}/10` : ""}${Number(display.runtime) > 0 ? ` · ${Number(display.runtime)} min` : ""}</span><span class="type">${tv ? "TV SERIES" : "FILM"}</span></div>${saved?.priority === "high" && status !== "watched" ? '<span class="priority-label">↑ High priority</span>' : ""}${progressText ? `<div class="progress-copy">${escapeHTML(progressText)}</div><div class="watch-progress"><span style="width:${progress.totalEpisodes ? Math.min(100, (progress.watchedEpisodes / progress.totalEpisodes) * 100) : 0}%"></span></div>` : ""}<div class="card-actions">${status === "watched" ? `<button class="saved" data-action="details" data-key="${key}">✓ ${tv ? "Completed" : "Watched"} · Edit</button><button data-action="log-again" data-key="${key}">Watch again</button>` : `<button class="${status ? "saved" : ""}" data-action="${status ? "details" : "save-watchlist"}" data-key="${key}">${status ? "✓ " + tracked : "+ Watchlist"}</button><button data-action="${tv ? "track-tv" : "draft-watched"}" data-key="${key}">${tv ? (tracking && tracking !== "watchlist" ? "Update progress" : "Track series") : "Log watched"}</button>`}</div>${saved?.logs?.length ? `<p class="card-note">${saved.logs.length} ${saved.logs.length === 1 ? "viewing" : "viewings"}${saved.watchedDate ? " · Last " + escapeHTML(saved.watchedDate) : " · Date unknown"}</p>` : ""}${
+      saved?.tags?.length
+        ? `<div class="card-tags">${saved.tags
+            .slice(0, 3)
+            .map((tag) => `<span>${escapeHTML(tag)}</span>`)
+            .join("")}</div>`
+        : ""
+    }${saved?.notes ? `<p class="list-note">${escapeHTML(saved.notes)}</p>` : ""}${item._recommendationReason ? `<p class="card-note">Because you chose ${escapeHTML(item._recommendationReason)}</p>` : ""}</div>`;
     const img = card.querySelector("img");
     img?.addEventListener(
       "error",
@@ -343,26 +622,35 @@ function renderCards(container, items, { rank = false } = {}) {
       { once: true },
     );
     fragment.append(card);
-  });
+  }
   container.replaceChildren(fragment);
 }
 function navigate(view, { focus = false } = {}) {
   if (
-    !["discover", "watchlist", "watched", "recommendations", "stats"].includes(
-      view,
-    )
+    ![
+      "discover",
+      "watchlist",
+      "watching",
+      "watched",
+      "recommendations",
+      "stats",
+    ].includes(view)
   )
     view = "discover";
   if (view !== state.view) {
+    if (state.view === "watching") $("library-type").value = "all";
     $("library-search").value = "";
     $("library-genre").value = "";
     $("library-rating").value = "";
+    $("library-tag").value = "";
+    $("library-progress").value = "";
+    $("library-priority").value = "";
   }
   state.view = view;
   document.querySelectorAll(".view").forEach((el) => {
     el.hidden =
       el.id !==
-      (["watchlist", "watched"].includes(view)
+      (["watchlist", "watching", "watched"].includes(view)
         ? "library-view"
         : `${view}-view`);
   });
@@ -372,172 +660,319 @@ function navigate(view, { focus = false } = {}) {
     if (active) btn.setAttribute("aria-current", "page");
     else btn.removeAttribute("aria-current");
   });
-  if (["watchlist", "watched"].includes(view)) renderLibrary();
+  if (["watchlist", "watching", "watched"].includes(view)) renderLibrary();
   if (view === "stats") renderStats();
-  if (view === "recommendations") loadRecommendations();
+  if (view === "recommendations") {
+    populateRecommendationSeeds();
+    loadRecommendations();
+  }
   saveLocation();
   if (focus) $("main").focus({ preventScroll: true });
 }
 function renderLibrary() {
-  const watched = state.view === "watched";
-  const source = watched ? library.watched : library.watchlist;
+  const watched = state.view === "watched",
+    watching = state.view === "watching";
+  const source = watched
+    ? allRecords().filter(hasHistory)
+    : watching
+      ? allRecords().filter(
+          (x) =>
+            typeOf(x) === "tv" &&
+            ["watching", "paused", "dropped"].includes(x.progress?.status),
+        )
+      : library.watchlist;
   $("library-title").textContent = watched
     ? "Your viewing journal."
-    : "The watchlist.";
+    : watching
+      ? "Pick up where you left off."
+      : "The watchlist.";
   $("library-description").textContent = watched
-    ? "Every watch, every rating, every thought worth keeping."
-    : "Good finds, ready for the right night.";
-  $("library-rating-label").hidden = !watched;
-  const previousGenre = $("library-genre").value;
-  const genreMap = new Map(
-    source
-      .flatMap((item) => item.genres || [])
-      .map((g) => [String(g.id), g.name]),
+    ? "The first watch, the rewatch, and everything worth remembering."
+    : watching
+      ? "Keep your place in the series you’re following."
+      : "Organize the good finds into a shortlist that works for you.";
+  $("history-display").hidden = !watched;
+  $("library-rating-label").hidden = false;
+  $("library-type").disabled = watching;
+  if (watching) $("library-type").value = "tv";
+  const previousGenre = $("library-genre").value,
+    previousTag = $("library-tag").value;
+  const genres = new Map(
+    source.flatMap((x) => x.genres || []).map((g) => [String(g.id), g.name]),
   );
   $("library-genre").innerHTML =
     '<option value="">All genres</option>' +
-    [...genreMap]
+    [...genres]
       .sort((a, b) => a[1].localeCompare(b[1]))
       .map(
         ([id, name]) =>
           `<option value="${escapeHTML(id)}">${escapeHTML(name)}</option>`,
       )
       .join("");
-  $("library-genre").value = genreMap.has(previousGenre) ? previousGenre : "";
-  const query = $("library-search").value.trim().toLocaleLowerCase(),
-    type = $("library-type").value,
-    genre = $("library-genre").value,
-    rating = $("library-rating").value;
-  let items = source.filter(
-    (item) =>
-      (type === "all" || typeOf(item) === type) &&
-      (!genre || (item.genres || []).some((g) => String(g.id) === genre)) &&
-      (!watched ||
-        !rating ||
-        (rating === "unrated"
-          ? !item.rating
-          : Number(item.rating) >= Number(rating))) &&
-      (!query ||
-        [
-          titleOf(item),
-          item.notes,
-          item.review,
-          ...(item.crew || []).map((p) => p.name),
-        ]
-          .join(" ")
-          .toLocaleLowerCase()
-          .includes(query)),
+  $("library-genre").value = genres.has(previousGenre) ? previousGenre : "";
+  const tags = [...new Set(allRecords().flatMap((x) => x.tags || []))].sort(
+    (a, b) => a.localeCompare(b),
   );
-  const sort = $("library-sort").value;
-  items = [...items].sort((a, b) =>
-    sort === "title"
-      ? titleOf(a).localeCompare(titleOf(b))
-      : sort === "year"
-        ? (yearOf(b) || "").localeCompare(yearOf(a) || "")
-        : sort === "rating"
-          ? (Number(b.rating) || 0) - (Number(a.rating) || 0)
-          : String(
-              watched ? b.watchedDate || "" : b.addedAt || b.addedDate || "",
-            ).localeCompare(
-              String(
-                watched ? a.watchedDate || "" : a.addedAt || a.addedDate || "",
-              ),
-            ),
-  );
+  $("library-tag").innerHTML =
+    '<option value="">All lists</option>' +
+    tags
+      .map(
+        (tag) =>
+          `<option value="${escapeHTML(tag)}">${escapeHTML(tag)}</option>`,
+      )
+      .join("");
+  $("library-tag").value = tags.includes(previousTag) ? previousTag : "";
+  const items = filterLibrary(source, {
+    query: $("library-search").value,
+    type: watching ? "tv" : $("library-type").value,
+    genreId: $("library-genre").value,
+    minRating: $("library-rating").value,
+    tag: $("library-tag").value,
+    favoriteOnly: $("library-favorites").checked,
+    priority: $("library-priority").value,
+    progressStatus: $("library-progress").value,
+    sort: $("library-sort").value,
+  });
   $("library-result-title").textContent = watched
-    ? "Logged titles"
-    : "Saved for later";
+    ? "Your watched titles"
+    : watching
+      ? "Series in progress"
+      : "Saved for later";
+  const display =
+    state.display === "history" && !watched ? "grid" : state.display;
+  document
+    .querySelectorAll("[data-display]")
+    .forEach((b) =>
+      b.setAttribute("aria-pressed", String(b.dataset.display === display)),
+    );
+  $("library-grid").classList.toggle("list-layout", display === "list");
+  $("library-grid").classList.toggle("history-layout", display === "history");
   $("library-count").textContent = `${items.length} of ${source.length} titles`;
-  renderCards($("library-grid"), items);
+  if (display === "history") renderHistory(items);
+  else renderCards($("library-grid"), items);
   if (!items.length)
     $("library-grid").innerHTML = empty(
       source.length
         ? "Nothing matches these filters."
         : watched
-          ? "The opening scene."
-          : "Make a night of it.",
+          ? "Your next story starts here."
+          : watching
+            ? "Ready for the next episode?"
+            : "Make a night of it.",
       source.length
         ? "Clear your search or adjust the collection filters."
         : watched
-          ? "Log your first movie or show to start your viewing journal."
-          : "Save a few movies and shows to build your next-watch shortlist.",
-      `<button class="btn primary" data-action="${source.length ? "reset-library" : "go-discover"}">${source.length ? "Clear filters" : "Explore titles ↗"}</button>`,
+          ? "Log a movie or series to start your viewing journal."
+          : watching
+            ? "Choose Track series on a TV show and save its progress."
+            : "Save titles, set priorities, and add your own lists.",
+      `<button class="btn primary" data-action="${source.length ? "reset-library" : "go-discover"}">${source.length ? "Clear filters" : "Find titles ↗"}</button>`,
+    );
+}
+function renderHistory(items) {
+  const entries = items
+    .flatMap((item) => (item.logs || []).map((log) => ({ item, log })))
+    .sort(
+      (a, b) =>
+        String(b.log.date || "").localeCompare(a.log.date || "") ||
+        String(b.log.id).localeCompare(a.log.id),
+    );
+  $("library-count").textContent =
+    `${plural(entries.length, "viewing")} · ${plural(items.length, "title")}`;
+  $("library-grid").innerHTML =
+    entries
+      .map(
+        ({ item, log }) =>
+          `<article class="history-row"><div><span class="history-date">${escapeHTML(log.date || "Date unknown")}</span><button class="title-button" data-action="details" data-key="${keyOf(item)}">${escapeHTML(titleOf(item))}</button><p>${typeOf(item) === "tv" ? "TV series" : "Movie"}${log.rating ? " · " + log.rating + "/10" : ""}${log.notes ? " · " + escapeHTML(log.notes) : ""}</p></div><button class="btn secondary" data-action="edit-log" data-key="${keyOf(item)}" data-log-id="${escapeHTML(log.id)}">Edit viewing</button></article>`,
+      )
+      .join("") ||
+    empty(
+      "No viewings match.",
+      "A logged watch will appear here, including rewatches.",
     );
 }
 function updateLibrary() {
   library = store.getSnapshot();
   reportStorageWarning(library.warning || "");
   $("watchlist-count").textContent = library.watchlist.length;
-  $("watched-count").textContent = library.watched.length;
+  $("watching-count").textContent = allRecords().filter(
+    (x) => typeOf(x) === "tv" && x.progress?.status === "watching",
+  ).length;
+  $("watched-count").textContent = allRecords().filter(hasHistory).length;
   if (state.view === "discover") renderDiscovery();
-  if (["watchlist", "watched"].includes(state.view)) renderLibrary();
+  if (["watchlist", "watching", "watched"].includes(state.view))
+    renderLibrary();
   if (state.view === "stats") renderStats();
   if (state.view === "recommendations") renderRecommendationCards();
   updateHiddenCount();
 }
-function saveCard(item, status) {
+async function hydrateSaved(item) {
+  const key = keyOf(item);
+  if (pendingMetadata.has(key) || !getSaved(item)) return;
+  pendingMetadata.add(key);
+  try {
+    const details = normalizeItem(
+      detailCache.get(key) || (await client.details(item.id, typeOf(item))),
+    );
+    detailCache.set(key, details);
+    if (getSaved(item))
+      store.updateMetadata(item.id, typeOf(item), metadataForStorage(details));
+  } catch {
+  } finally {
+    pendingMetadata.delete(key);
+  }
+}
+function saveCard(item, status = "watchlist") {
+  if (!item) return;
+  if (status === "watched") {
+    openDetails(item, { status: "watched", newLog: true });
+    return;
+  }
   const data = normalizeItem({ ...item, ...detailCache.get(keyOf(item)) });
   if (
     safeMutation(
-      () => store.saveItem(data, status),
-      status === "watched"
-        ? `Logged “${titleOf(item)}” as watched.`
-        : `Added “${titleOf(item)}” to your watchlist.`,
+      () => store.saveItem(metadataForStorage(data), "watchlist"),
+      `Added “${titleOf(item)}” to your watchlist.`,
     )
-  ) {
-    if (status === "watched") openDetails({ ...data, ...getSaved(data) });
-  }
+  )
+    hydrateSaved(data);
+}
+function toggleFavorite(item) {
+  const saved = getSaved(item),
+    data = normalizeItem({ ...item, ...detailCache.get(keyOf(item)) }),
+    favorite = !saved?.favorite;
+  if (
+    safeMutation(
+      () =>
+        store.saveItem(
+          metadataForStorage(data),
+          getStatus(item) || "watchlist",
+          { favorite },
+        ),
+      favorite ? "Added to favorites." : "Removed from favorites.",
+    )
+  )
+    hydrateSaved(data);
+}
+function ratingOptions(value = 0) {
+  return (
+    '<option value="0">Not rated</option>' +
+    Array.from({ length: 19 }, (_, i) => 1 + i / 2)
+      .map(
+        (n) =>
+          `<option value="${n}"${Number(value) === n ? " selected" : ""}>${n} / 10</option>`,
+      )
+      .join("")
+  );
 }
 function detailMarkup(item, warning = "") {
   const saved = getSaved(item),
-    status = getStatus(item),
     combined = normalizeItem({
       ...saved,
       ...item,
       ...Object.fromEntries(
-        ["rating", "notes", "review", "watchedDate"]
+        [
+          "rating",
+          "notes",
+          "review",
+          "watchedDate",
+          "tags",
+          "favorite",
+          "priority",
+          "progress",
+          "logs",
+        ]
           .filter((k) => saved && Object.hasOwn(saved, k))
           .map((k) => [k, saved[k]]),
       ),
     });
+  const status = state.detailDraft?.status || trackedState(item) || "watchlist",
+    tv = typeOf(item) === "tv";
   const image = imageURL(combined.poster_path),
     rating = Number(combined.vote_average),
-    mt = typeOf(item);
-  const imdb = combined.externalIds?.imdb_id;
-  return `<div class="detail-header">${image ? `<img class="detail-poster" src="${image}" alt="Poster for ${escapeHTML(titleOf(item))}">` : '<div class="detail-poster"></div>'}<div><h2 id="detail-title">${escapeHTML(titleOf(item))}</h2><div class="movie-meta"><span>${escapeHTML(yearOf(combined) || "Year unknown")}</span><span>${mt === "tv" ? "TV series" : "Movie"}</span>${combined.runtime ? `<span>${Number(combined.runtime)} min${mt === "tv" ? " / episode" : ""}</span>` : ""}${rating ? `<span>★ ${rating.toFixed(1)} TMDB</span>` : ""}</div><div class="detail-genres">${(combined.genres || []).map((g) => `<span>${escapeHTML(g.name)}</span>`).join("")}</div><div class="detail-links"><a href="https://www.themoviedb.org/${mt}/${Number(item.id)}" target="_blank" rel="noopener noreferrer">View on TMDB ↗</a>${/^tt\d+$/.test(imdb) ? `<a href="https://www.imdb.com/title/${imdb}/" target="_blank" rel="noopener noreferrer">IMDb ↗</a>` : ""}</div></div></div><div id="detail-live-status">${warning ? `<div class="notice">${escapeHTML(warning)}</div>` : ""}</div><p class="detail-overview">${escapeHTML(combined.overview || "No overview is available for this title.")}</p><form id="record-form" class="record-panel"><h3>Your record</h3><div class="record-fields"><label>Status<select id="record-status"><option value="watchlist"${status === "watchlist" || !status ? " selected" : ""}>On my watchlist</option><option value="watched"${status === "watched" ? " selected" : ""}>Watched</option></select></label><label id="record-rating-label">Your rating<select id="record-rating"><option value="0">Not rated</option>${Array.from(
-    { length: 19 },
-    (_, i) => 1 + i / 2,
-  )
-    .map(
-      (n) =>
-        `<option value="${n}"${Number(combined.rating) === n ? " selected" : ""}>${n} / 10</option>`,
-    )
-    .join(
-      "",
-    )}</select></label><label id="record-date-label">Date watched<input type="date" id="record-date" max="${today()}" value="${escapeHTML((combined.watchedDate || today()).slice(0, 10))}"></label></div><label class="record-notes">Your notes<textarea id="record-notes" maxlength="20000" placeholder="What did you think? Who did you watch it with?">${escapeHTML(combined.notes || combined.review || "")}</textarea></label><div class="record-footer"><p>Your rating and notes stay with this title when you change its status.</p><button class="btn primary" type="submit">Save record</button></div><div id="record-message" class="form-error" role="alert"></div></form><div class="detail-section"><h3>Where to watch <span class="small muted">· United States</span></h3><div id="providers-content"><button class="btn secondary" data-action="providers">Check availability</button><p class="small muted">Availability provided by JustWatch via TMDB.</p></div></div>${combined.belongs_to_collection ? `<div class="detail-section"><button class="btn secondary" data-action="collection" data-id="${Number(combined.belongs_to_collection.id)}">Explore ${escapeHTML(combined.belongs_to_collection.name)} ↗</button></div>` : ""}${combined.crew?.length ? `<div class="detail-section"><h3>Behind the camera</h3><p>${combined.crew.map((p) => `${escapeHTML(p.name)}${p.job ? " · " + escapeHTML(p.job) : ""}`).join(" &nbsp; / &nbsp; ")}</p></div>` : ""}${combined.cast?.length ? `<div class="detail-section"><h3>Cast</h3><p>${combined.cast.map((p) => escapeHTML(p.name)).join(" · ")}</p></div>` : ""}<div class="detail-actions">${status ? '<button class="text-btn danger" data-action="remove-record">Remove from collection</button>' : "<span></span>"}<button class="text-btn" data-action="hide-title">Hide from discovery</button></div>`;
+    imdb = combined.externalIds?.imdb_id;
+  const progress = combined.progress || {},
+    logs = combined.logs || [];
+  const trailer = item.videos?.results?.find(
+    (v) =>
+      v.site === "YouTube" &&
+      v.type === "Trailer" &&
+      /^[\w-]{6,50}$/.test(v.key),
+  );
+  const currentDate = state.detailDraft?.newLog
+    ? today()
+    : !logs.length
+      ? today()
+      : "";
+  const statuses = tv
+    ? [
+        ["watchlist", "Want to watch"],
+        ["watching", "Watching"],
+        ["paused", "Paused"],
+        ["dropped", "Dropped"],
+        ["watched", "Completed"],
+      ]
+    : [
+        ["watchlist", "Want to watch"],
+        ["watched", "Watched"],
+      ];
+  return `<div class="detail-header">${image ? `<img class="detail-poster" src="${image}" alt="Poster for ${escapeHTML(titleOf(item))}">` : '<div class="detail-poster"></div>'}<div><h2 id="detail-title">${escapeHTML(titleOf(item))}</h2><div class="movie-meta"><span>${escapeHTML(yearOf(combined) || "Date not announced")}</span><span>${tv ? "TV series" : "Movie"}</span>${Number(combined.runtime) > 0 ? `<span>${Number(combined.runtime)} min${tv ? " / episode" : ""}</span>` : ""}${rating > 0 ? `<span>★ ${rating.toFixed(1)} TMDB · ${number(combined.vote_count)} votes</span>` : ""}</div><div class="detail-genres">${(combined.genres || []).map((g) => `<span>${escapeHTML(g.name)}</span>`).join("")}</div><div class="detail-links"><a href="https://www.themoviedb.org/${typeOf(item)}/${Number(item.id)}" target="_blank" rel="noopener noreferrer">TMDB ↗</a>${/^tt\d+$/.test(imdb) ? `<a href="https://www.imdb.com/title/${imdb}/" target="_blank" rel="noopener noreferrer">IMDb ↗</a>` : ""}${trailer ? `<a href="https://www.youtube.com/watch?v=${trailer.key}" target="_blank" rel="noopener noreferrer">Watch trailer ↗</a>` : ""}</div></div></div><div id="detail-live-status">${warning ? `<div class="notice">${escapeHTML(warning)}</div>` : ""}</div><p class="detail-overview">${escapeHTML(combined.overview || "No overview is available for this title.")}</p>
+  <form id="record-form" class="record-panel"><div class="record-heading"><h3>${state.detailDraft?.newLog ? "Log a viewing" : "Your record"}</h3><span id="record-save-state" class="small muted">${saved ? "Saved record" : "New record"} · Save to keep changes</span></div>
+  <div class="record-fields"><label>Status<select id="record-status">${statuses.map(([value, label]) => `<option value="${value}"${status === value ? " selected" : ""}>${label}</option>`).join("")}</select></label><label>Your overall rating<select id="record-rating">${ratingOptions(combined.rating)}</select></label><label id="record-priority-label">Watchlist priority<select id="record-priority"><option value="normal">Normal</option><option value="high"${combined.priority === "high" ? " selected" : ""}>High</option><option value="low"${combined.priority === "low" ? " selected" : ""}>Low</option></select></label></div>
+  ${tv ? `<div id="record-progress-panel" class="tv-progress-fields"><h4>Your place in the series</h4><div class="record-fields"><label>Episodes watched<input id="record-progress" type="number" min="0" max="100000" value="${Number(progress.watchedEpisodes) || 0}" inputmode="numeric"></label><label>Total episodes <span class="muted">· 0 if unknown</span><input id="record-total" type="number" min="0" max="100000" value="${Number(progress.totalEpisodes ?? combined.number_of_episodes ?? 0) || 0}" inputmode="numeric"></label><label>Current season <span class="muted">· optional</span><input id="record-season" type="number" min="0" max="10000" value="${progress.currentSeason ?? ""}" inputmode="numeric"></label><label>Episode in season <span class="muted">· optional</span><input id="record-episode" type="number" min="0" max="100000" value="${progress.currentEpisode ?? ""}" inputmode="numeric"></label></div>${Number(combined.number_of_episodes) > 0 ? `<button type="button" class="text-btn" data-action="episode-total" data-count="${Number(combined.number_of_episodes)}">Use TMDB total: ${Number(combined.number_of_episodes)} episodes</button>` : ""}<p class="small muted">Progress is your own marker. Add episodes as you watch; mark Completed when you’re finished.</p></div>` : ""}
+  <div id="record-log-fields" class="new-viewing-fields" hidden><h4>This viewing</h4><label>Date watched <span class="muted">· leave blank if unknown</span><input type="date" id="record-date" max="${today()}" value="${currentDate}"></label><label>Viewing notes <span class="muted">· optional</span><input id="record-log-notes" maxlength="20000" placeholder="Who you watched with, the cinema, a rewatch…"></label><p class="small muted">This adds one entry to your viewing history.</p></div>
+  <div class="record-organization"><label>Personal lists <span class="muted">· separate with commas</span><input id="record-tags" maxlength="1000" placeholder="Weekend picks, With family, Favorites to rewatch" value="${escapeHTML((combined.tags || []).join(", "))}"></label><label class="check-label"><input id="record-favorite" type="checkbox"${combined.favorite ? " checked" : ""}> Add to favorites</label></div>
+  <label class="record-notes">Your personal notes<textarea id="record-notes" maxlength="20000" placeholder="Thoughts, a recommendation from a friend, anything worth keeping…">${escapeHTML(combined.notes || combined.review || "")}</textarea></label>
+  <div class="record-footer"><p>Personal notes, lists and history stay with this title when you change its status.</p><div class="inline-controls"><button class="btn secondary" type="button" data-action="close-dialog">Cancel</button><button class="btn primary" type="submit">${state.detailDraft?.newLog ? "Save viewing" : "Save record"}</button></div></div><div id="record-message" class="form-error" role="alert"></div></form>
+  <section class="viewing-history"><div class="record-heading"><h3>Viewing history <span class="small muted">${logs.length ? `· ${logs.length} ${logs.length === 1 ? "viewing" : "viewings"}` : ""}</span></h3>${saved ? '<button class="text-btn" data-action="log-again">Log another watch +</button>' : ""}</div>${
+    logs.length
+      ? logs
+          .slice()
+          .sort((a, b) => String(b.date || "").localeCompare(a.date || ""))
+          .map(
+            (log) =>
+              `<div class="detail-log"><div><strong>${escapeHTML(log.date || "Date unknown")}</strong><span>${log.rating ? " · " + log.rating + "/10" : ""}</span>${log.notes ? `<p>${escapeHTML(log.notes)}</p>` : ""}</div><button class="text-btn" data-action="edit-log" data-log-id="${escapeHTML(log.id)}">Edit</button></div>`,
+          )
+          .join("")
+      : '<p class="small muted">No viewings logged yet. A date can be left unknown.</p>'
+  }</section>
+  <div class="detail-section"><h3>Where to watch <span class="small muted">· ${escapeHTML($("watch-region").selectedOptions[0]?.textContent || "United States")}</span></h3><div id="providers-content"><button class="btn secondary" data-action="providers">Check availability</button><p class="small muted">Streaming, rental and purchase options from JustWatch via TMDB.</p></div></div>
+  ${combined.belongs_to_collection ? `<div class="detail-section"><button class="btn secondary" data-action="collection" data-id="${Number(combined.belongs_to_collection.id)}">Explore ${escapeHTML(combined.belongs_to_collection.name)} ↗</button></div>` : ""}
+  ${combined.crew?.length ? `<div class="detail-section"><h3>Behind the camera</h3><p>${combined.crew.map((p) => `${escapeHTML(p.name)}${p.job ? " · " + escapeHTML(p.job) : ""}`).join(" &nbsp; / &nbsp; ")}</p></div>` : ""}${combined.cast?.length ? `<div class="detail-section"><h3>Cast</h3><p>${combined.cast.map((p) => escapeHTML(p.name)).join(" · ")}</p></div>` : ""}<div class="detail-actions">${saved ? '<button class="text-btn danger" data-action="remove-record">Remove from collection</button>' : "<span></span>"}<button class="text-btn" data-action="hide-title">Hide from discovery</button></div>`;
+}
+function markDirty(event) {
+  recordDirty = true;
+  const field = typeof event === "string" ? event : event?.target?.id;
+  if (field) dirtyFields.add(field);
+  if ($("record-save-state"))
+    $("record-save-state").textContent = "Unsaved changes";
 }
 function renderDetail(item, warning = "") {
   ++state.detailPresentation;
   state.detailItem = item;
   recordDirty = false;
+  dirtyFields = new Set();
+  draftBase = getSaved(item)
+    ? JSON.parse(JSON.stringify(getSaved(item)))
+    : null;
+  draftBaseStatus = trackedState(item);
   $("detail-content").innerHTML = detailMarkup(item, warning);
   syncRecordFields();
-  $("record-form").addEventListener("input", () => {
-    recordDirty = true;
-  });
+  $("record-form").addEventListener("input", markDirty);
+  $("record-form").addEventListener("change", markDirty);
   $("record-status").addEventListener("change", syncRecordFields);
   $("record-form").addEventListener("submit", saveRecord);
 }
-async function openDetails(item) {
+async function openDetails(item, draft = null) {
   if (!item) return;
+  state.detailDraft = draft;
   state.detailController?.abort();
   const controller = new AbortController();
   state.detailController = controller;
-  const sequence = ++state.detailSequence;
-  const cached = detailCache.get(keyOf(item));
+  const sequence = ++state.detailSequence,
+    cached = detailCache.get(keyOf(item));
   state.detailItem = normalizeItem({ ...item, ...cached });
-  const dialog = $("movie-dialog");
-  if (!dialog.open) dialog.showModal();
+  if (!$("movie-dialog").open) $("movie-dialog").showModal();
   if (cached) {
     renderDetail(cached);
     return;
@@ -554,6 +989,15 @@ async function openDetails(item) {
     );
     if (sequence !== state.detailSequence || controller.signal.aborted) return;
     detailCache.set(keyOf(details), details);
+    if (getSaved(item)) {
+      try {
+        store.updateMetadata(
+          item.id,
+          typeOf(item),
+          metadataForStorage(details),
+        );
+      } catch {}
+    }
     if (
       presentation === state.detailPresentation &&
       !recordDirty &&
@@ -565,41 +1009,168 @@ async function openDetails(item) {
       if ($("detail-live-status")) $("detail-live-status").textContent = "";
     }
   } catch (error) {
-    if (sequence !== state.detailSequence || controller.signal.aborted) return;
-    if ($("detail-live-status"))
+    if (
+      sequence === state.detailSequence &&
+      !controller.signal.aborted &&
+      $("detail-live-status")
+    )
       $("detail-live-status").textContent =
-        "Live details could not be loaded. You can still save and edit this record. " +
+        "Live details could not load. Your personal record can still be edited. " +
         error.message;
   }
 }
+function needsNewLog() {
+  const saved = getSaved(state.detailItem);
+  return (
+    $("record-status")?.value === "watched" &&
+    (!!state.detailDraft?.newLog ||
+      ((!saved || getStatus(saved) !== "watched") &&
+        !(saved?.logs || []).length))
+  );
+}
 function syncRecordFields() {
-  const watched = $("record-status")?.value === "watched";
-  if (!$("record-rating-label")) return;
-  $("record-rating-label").hidden = !watched;
-  $("record-date-label").hidden = !watched;
-  $("record-date").required = watched;
+  if (!$("record-status")) return;
+  const status = $("record-status").value;
+  $("record-log-fields").hidden = !needsNewLog();
+  $("record-priority-label").hidden = status === "watched";
+  if ($("record-progress-panel"))
+    $("record-progress-panel").hidden = status === "watchlist";
 }
 function saveRecord(event) {
   event.preventDefault();
   const item = state.detailItem;
   if (!item) return;
-  const status = $("record-status").value;
-  const date = $("record-date").value;
-  if (status === "watched" && (!date || date > today())) {
+  const current = getSaved(item),
+    existing = !!draftBase;
+  if (existing && !current) {
     $("record-message").textContent =
-      "Choose a valid date watched, up to today.";
+      "This title was removed in another tab. Your edits are kept here; cancel and reopen the title before saving.";
     return;
   }
-  const changes = { notes: $("record-notes").value };
-  if (status === "watched") {
-    changes.rating = Number($("record-rating").value);
-    changes.watchedDate = date;
+  const chosen = $("record-status").value,
+    statusEdited =
+      !existing ||
+      dirtyFields.has("record-status") ||
+      !!state.detailDraft?.status;
+  const status = statusEdited ? chosen : trackedState(item) || chosen,
+    date = $("record-date").value;
+  if (needsNewLog() && date && date > today()) {
+    $("record-message").textContent =
+      "Choose a date up to today, or leave it blank if unknown.";
+    return;
   }
+  const values = {
+    "record-notes": ["notes", $("record-notes").value],
+    "record-rating": ["rating", Number($("record-rating").value)],
+    "record-tags": [
+      "tags",
+      $("record-tags")
+        .value.split(",")
+        .map((t) => t.trim())
+        .filter(Boolean),
+    ],
+    "record-favorite": ["favorite", $("record-favorite").checked],
+    "record-priority": ["priority", $("record-priority").value],
+  };
+  if (typeOf(item) === "tv") {
+    Object.assign(values, {
+      "record-progress": [
+        "progress.watchedEpisodes",
+        Number($("record-progress").value),
+      ],
+      "record-total": [
+        "progress.totalEpisodes",
+        Number($("record-total").value),
+      ],
+    });
+    values["record-season"] = [
+      "progress.currentSeason",
+      $("record-season").value === ""
+        ? undefined
+        : Number($("record-season").value),
+    ];
+    values["record-episode"] = [
+      "progress.currentEpisode",
+      $("record-episode").value === ""
+        ? undefined
+        : Number($("record-episode").value),
+    ];
+  }
+  const edits = Object.fromEntries(
+    Object.entries(values)
+      .filter(([id]) => !existing || dirtyFields.has(id))
+      .map(([, entry]) => entry),
+  );
+  if (typeOf(item) === "tv" && statusEdited)
+    edits["progress.status"] =
+      status === "watchlist"
+        ? "planned"
+        : status === "watched"
+          ? "completed"
+          : status;
   try {
-    store.saveItem(normalizeItem(item), status, changes);
+    const { changes, conflicts } = mergePersonalEdits(
+      draftBase || {},
+      current || {},
+      edits,
+    );
+    if (
+      existing &&
+      statusEdited &&
+      draftBaseStatus !== trackedState(item) &&
+      status !== trackedState(item)
+    )
+      conflicts.push("status");
+    if (
+      conflicts.length &&
+      !confirm(
+        "These fields changed in another tab: " +
+          conflicts
+            .map(
+              (field) =>
+                ({
+                  notes: "personal notes",
+                  rating: "rating",
+                  tags: "personal lists",
+                  priority: "priority",
+                  favorite: "favorite",
+                  date: "viewing date",
+                  "progress.watchedEpisodes": "episodes watched",
+                  "progress.totalEpisodes": "total episodes",
+                  "progress.currentSeason": "season marker",
+                  "progress.currentEpisode": "episode marker",
+                  "progress.status": "tracking state",
+                })[field] || field,
+            )
+            .join(", ") +
+          ". Save your edits to those fields?",
+      )
+    )
+      return;
+    const before = JSON.stringify(store.getSnapshot());
+    if (needsNewLog()) {
+      if (existing && !dirtyFields.has("record-rating"))
+        changes.rating = current.rating || 0;
+      store.logWatch(
+        metadataForStorage(item),
+        {
+          date: date || "",
+          rating: Number($("record-rating").value),
+          notes: $("record-log-notes").value,
+        },
+        changes,
+      );
+    } else
+      store.saveItem(
+        metadataForStorage(item),
+        status === "watched" ? "watched" : "watchlist",
+        changes,
+      );
+    const changed = before !== JSON.stringify(store.getSnapshot());
     recordDirty = false;
     closeDialog($("movie-dialog"));
-    toast("Your record is saved.", true);
+    toast(changed ? "Your record is saved." : "No changes to save.", changed);
+    hydrateSaved(item);
   } catch (error) {
     $("record-message").textContent = error.message;
   }
@@ -608,16 +1179,110 @@ function closeDialog(dialog) {
   if (
     dialog.id === "movie-dialog" &&
     recordDirty &&
-    !confirm("Discard your unsaved record changes?")
+    !confirm("Discard your unsaved changes?")
   )
     return false;
+  const key = state.detailItem ? keyOf(state.detailItem) : null;
   if (dialog.id === "movie-dialog") {
     recordDirty = false;
+    state.detailDraft = null;
     state.detailController?.abort();
     ++state.detailSequence;
   }
+  if (dialog.contains($("toast"))) document.body.append($("toast"));
   dialog.close();
+  if (document.activeElement === document.body && key)
+    document.querySelector(`article[data-key="${key}"] .title-button`)?.focus();
   return true;
+}
+async function openLogEditor(item, logId) {
+  if (recordDirty && !confirm("Discard your unsaved changes?")) return;
+  const saved = getSaved(item),
+    log = saved?.logs?.find((l) => l.id === logId);
+  if (!log) return;
+  state.detailController?.abort();
+  state.detailController = new AbortController();
+  ++state.detailSequence;
+  ++state.detailPresentation;
+  state.detailItem = normalizeItem({
+    ...item,
+    ...detailCache.get(keyOf(item)),
+  });
+  state.detailDraft = null;
+  recordDirty = false;
+  dirtyFields = new Set();
+  const logBase = JSON.parse(JSON.stringify(log));
+  if (!$("movie-dialog").open) $("movie-dialog").showModal();
+  $("detail-content").innerHTML =
+    `<h2 id="detail-title">Edit a viewing</h2><p class="intro">${escapeHTML(titleOf(item))}</p><form id="edit-log-form" class="record-panel"><div class="record-fields"><label>Date watched <span class="muted">· optional</span><input id="edit-log-date" type="date" max="${today()}" value="${escapeHTML(log.date || "")}"></label><label>Rating for this viewing<select id="edit-log-rating">${ratingOptions(log.rating)}</select></label></div><label class="record-notes">Viewing notes<textarea id="edit-log-notes" maxlength="20000">${escapeHTML(log.notes || "")}</textarea></label><div class="record-footer"><button type="button" class="text-btn danger" data-action="remove-log" data-log-id="${escapeHTML(log.id)}">Delete this viewing</button><div class="inline-controls"><button type="button" class="btn secondary" data-action="back-detail">Cancel</button><button class="btn primary" type="submit">Save viewing</button></div></div><div id="record-message" class="form-error" role="alert"></div></form>`;
+  $("edit-log-form").addEventListener("input", markDirty);
+  $("edit-log-form").addEventListener("change", markDirty);
+  $("edit-log-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const date = $("edit-log-date").value;
+    if (date && date > today()) {
+      $("record-message").textContent =
+        "Choose a date up to today, or leave it blank.";
+      return;
+    }
+    const current = getSaved(item)?.logs?.find((l) => l.id === log.id);
+    if (!current) {
+      $("record-message").textContent =
+        "This viewing was removed in another tab. Your edits remain here; cancel to review the current history.";
+      return;
+    }
+    const fields = {
+      "edit-log-date": ["date", date],
+      "edit-log-rating": ["rating", Number($("edit-log-rating").value)],
+      "edit-log-notes": ["notes", $("edit-log-notes").value],
+    };
+    const edits = Object.fromEntries(
+      Object.entries(fields)
+        .filter(([id]) => dirtyFields.has(id))
+        .map(([, entry]) => entry),
+    );
+    try {
+      const { changes, conflicts } = mergePersonalEdits(
+        logBase,
+        current,
+        edits,
+      );
+      if (
+        conflicts.length &&
+        !confirm(
+          "This viewing changed in another tab (" +
+            conflicts
+              .map(
+                (field) =>
+                  ({
+                    notes: "personal notes",
+                    rating: "rating",
+                    tags: "personal lists",
+                    priority: "priority",
+                    favorite: "favorite",
+                    date: "viewing date",
+                    "progress.watchedEpisodes": "episodes watched",
+                    "progress.totalEpisodes": "total episodes",
+                    "progress.currentSeason": "season marker",
+                    "progress.currentEpisode": "episode marker",
+                    "progress.status": "tracking state",
+                  })[field] || field,
+              )
+              .join(", ") +
+            "). Save your edits to those fields?",
+        )
+      )
+        return;
+      const before = JSON.stringify(store.getSnapshot());
+      store.updateLog(item.id, typeOf(item), log.id, changes);
+      const changed = before !== JSON.stringify(store.getSnapshot());
+      recordDirty = false;
+      renderDetail(state.detailItem);
+      toast(changed ? "Viewing updated." : "No changes to save.", changed);
+    } catch (error) {
+      $("record-message").textContent = error.message;
+    }
+  });
 }
 async function loadProviders() {
   ++state.detailPresentation;
@@ -639,7 +1304,7 @@ async function loadProviders() {
       !target.isConnected
     )
       return;
-    const us = data.results?.US;
+    const us = data.results?.[$("watch-region").value || "US"];
     const groups = [
       ["flatrate", "Stream"],
       ["free", "Free"],
@@ -660,7 +1325,7 @@ async function loadProviders() {
         ? us.link
         : "";
     $("providers-content").innerHTML =
-      `<div class="providers">${html || "<p>No US availability is listed for this title.</p>"}${link ? `<a class="text-btn" href="${escapeHTML(link)}" target="_blank" rel="noopener noreferrer">See watch options ↗</a>` : ""}<p class="small muted">Availability may change. Data provided by JustWatch via TMDB.</p></div>`;
+      `<div class="providers">${html || "<p>No availability is listed for this title in the selected region.</p>"}${link ? `<a class="text-btn" href="${escapeHTML(link)}" target="_blank" rel="noopener noreferrer">See watch options ↗</a>` : ""}<p class="small muted">Availability may change. Data provided by JustWatch via TMDB.</p></div>`;
   } catch (error) {
     if (sequence === state.detailSequence && target.isConnected)
       target.innerHTML = `<p class="form-error">${escapeHTML(error.message)}</p><button class="text-btn" data-action="providers">Try again</button>`;
@@ -695,52 +1360,84 @@ async function loadCollection(id) {
     }
   }
 }
+function populateRecommendationSeeds() {
+  const selected = $("rec-seed").value,
+    type = $("rec-type").value;
+  const seeds = allRecords()
+    .filter((x) => type === "all" || typeOf(x) === type)
+    .sort((a, b) => titleOf(a).localeCompare(titleOf(b)));
+  $("rec-seed").innerHTML =
+    '<option value="">My favorites & titles rated 7+</option>' +
+    seeds
+      .map(
+        (x) =>
+          `<option value="${keyOf(x)}">${escapeHTML(titleOf(x))}${typeOf(x) === "tv" ? " · TV" : ""}</option>`,
+      )
+      .join("");
+  $("rec-seed").value = seeds.some((x) => keyOf(x) === selected)
+    ? selected
+    : "";
+}
 async function loadRecommendations() {
   state.recommendationController?.abort();
   state.recommendationsReady = false;
   const controller = new AbortController();
   state.recommendationController = controller;
-  const seeds = [...library.watched]
-    .filter((x) => !x.rating || x.rating >= 7)
-    .sort(
-      (a, b) =>
-        (b.rating || 0) - (a.rating || 0) ||
-        String(b.watchedDate || "").localeCompare(a.watchedDate || ""),
-    )
-    .slice(0, 5);
+  const type = $("rec-type").value,
+    filtered = {
+      watchlist: library.watchlist.filter(
+        (x) => type === "all" || typeOf(x) === type,
+      ),
+      watched: library.watched.filter(
+        (x) => type === "all" || typeOf(x) === type,
+      ),
+    };
+  const seeds = recommendationSeeds(filtered, {
+    seedKey: $("rec-seed").value,
+    offset: state.recOffset,
+    limit: 4,
+  });
   if (!seeds.length) {
     state.recommendations = [];
     $("recommendations-message").innerHTML = empty(
       "Start with something you love.",
-      "Log a few titles and rate the ones you enjoyed to get personal suggestions.",
-      '<button class="btn primary" data-action="go-discover">Find a title ↗</button>',
+      allRecords().length
+        ? "Choose any saved title in “Based on”, favorite a title, or rate a watch 7 or higher."
+        : "Save a favorite or rate a watch to start getting personal suggestions.",
+      '<button class="btn primary" data-action="go-discover">Find titles ↗</button>',
     );
     $("recommendations-grid").innerHTML = "";
     return;
   }
   $("recommendations-message").innerHTML =
-    '<div class="loading"><span class="spinner"></span>Following your taste…</div>';
+    '<div class="loading"><span class="spinner"></span>Finding your next watch…</div>';
   $("recommendations-grid").innerHTML = "";
   const responses = await Promise.allSettled(
     seeds.map(async (seed) => ({
       seed,
       data: await client.recommendations(seed.id, typeOf(seed), {
         signal: controller.signal,
+        ...(recommendationCursors.get(keyOf(seed))
+          ? { cursor: recommendationCursors.get(keyOf(seed)) }
+          : {}),
       }),
     })),
   );
   if (controller.signal.aborted) return;
-  const candidates = new Map();
-  const errors = [];
+  const candidates = new Map(),
+    errors = [];
   for (const response of responses) {
     if (response.status === "rejected") {
       errors.push(
-        response.reason?.message || "Some suggestions could not be loaded.",
+        response.reason?.message || "Some suggestions could not load.",
       );
       continue;
     }
     const { seed, data } = response.value;
     if (data.warning) errors.push(data.warning);
+    if (data.nextCursor)
+      recommendationCursors.set(keyOf(seed), data.nextCursor);
+    else recommendationCursors.delete(keyOf(seed));
     data.results.forEach((item, index) => {
       const key = keyOf(item);
       if (!candidates.has(key))
@@ -754,55 +1451,95 @@ async function loadRecommendations() {
   state.recommendations = [...candidates.values()]
     .filter(
       (x) =>
-        !x.adult &&
-        (!yearOf(x) || (x.release_date || x.first_air_date || "") <= today()),
+        !seenRecommendations.has(keyOf(x)) &&
+        (type === "all" || typeOf(x) === type),
     )
-    .sort((a, b) => a._recommendationRank - b._recommendationRank)
-    .slice(0, 100);
-  $("recommendations-message").innerHTML = errors.length
-    ? `<div class="notice warning">${escapeHTML(errors[0])} <button class="text-btn" data-action="retry-recommendations">Try again</button></div>`
-    : '<p class="small muted">Based on ' +
-      seeds.map((s) => escapeHTML(titleOf(s))).join(", ") +
-      ". Titles already in your collection are excluded.</p>";
+    .sort((a, b) => a._recommendationRank - b._recommendationRank);
+  $("recommendations-message").innerHTML =
+    (errors.length
+      ? `<div class="notice warning">${escapeHTML(errors[0])} <button class="text-btn" data-action="retry-recommendations">Try again</button></div>`
+      : "") +
+    '<p class="small muted">Based on ' +
+    seeds.map((s) => escapeHTML(titleOf(s))).join(", ") +
+    ". Your collection and hidden titles are excluded.</p>";
   state.recommendationsReady = true;
   renderRecommendationCards();
 }
 function renderRecommendationCards() {
-  const excluded = new Set(
-    [...library.watchlist, ...library.watched].map(keyOf).concat(hiddenKeys()),
-  );
+  const excluded = new Set(allRecords().map(keyOf).concat(hiddenKeys()));
   const items = state.recommendations
     .filter((x) => !excluded.has(keyOf(x)))
     .slice(0, 50);
   renderCards($("recommendations-grid"), items);
+  for (const item of items) seenRecommendations.add(keyOf(item));
+  $("recommendations-grid")
+    .querySelectorAll(".movie-card")
+    .forEach((card) => {
+      const b = document.createElement("button");
+      b.className = "text-btn dismiss-recommendation";
+      b.dataset.action = "hide-recommendation";
+      b.dataset.key = card.dataset.key;
+      b.textContent = "Not for me";
+      card.querySelector(".movie-info").append(b);
+    });
   if (!items.length && state.recommendationsReady)
     $("recommendations-grid").innerHTML = empty(
-      "You’re all caught up.",
-      "Log more titles or refresh suggestions to find something different.",
+      "No new suggestions right now.",
+      "Choose another title, change the type, or revisit the suggestions you’ve already seen.",
+      '<button class="btn secondary" data-action="reset-suggestions">Revisit suggestions</button>',
     );
 }
 function renderStats() {
-  const watched = library.watched,
-    rated = watched.filter((x) => Number(x.rating) > 0),
-    films = watched.filter((x) => typeOf(x) === "movie");
-  const timed = films.filter((x) => Number(x.runtime) > 0),
-    minutes = timed.reduce((sum, x) => sum + Number(x.runtime), 0);
-  const genres = new Map();
+  const stats = libraryStats(library),
+    watched = allRecords().filter(hasHistory),
+    rated = watched.filter((x) => Number(x.rating) > 0);
+  const top = [...rated].sort((a, b) => b.rating - a.rating).slice(0, 8),
+    genres = new Map();
   watched.forEach((item) =>
     (item.genres || []).forEach((g) =>
       genres.set(g.name, (genres.get(g.name) || 0) + 1),
     ),
   );
-  const sortedGenres = [...genres].sort((a, b) => b[1] - a[1]).slice(0, 8);
-  const top = [...rated].sort((a, b) => b.rating - a.rating).slice(0, 8);
+  const sortedGenres = [...genres].sort((a, b) => b[1] - a[1]).slice(0, 6);
   top.forEach((item) => itemCache.set(keyOf(item), item));
   $("stats-content").innerHTML =
-    `<div class="stats-grid"><div class="stat"><strong>${number(library.watchlist.length)}</strong><span>On your watchlist</span></div><div class="stat"><strong>${number(watched.length)}</strong><span>${films.length} films · ${watched.length - films.length} TV shows watched</span></div><div class="stat"><strong>${rated.length ? (rated.reduce((sum, x) => sum + Number(x.rating), 0) / rated.length).toFixed(1) : "—"}</strong><span>Your average rating · ${rated.length} rated</span></div><div class="stat"><strong>${(minutes / 60).toFixed(1)}<small class="small"> h</small></strong><span>Film time · ${timed.length} known runtimes</span></div></div><p class="small muted" style="margin-top:16px">Film time excludes TV series and films without a known runtime. It counts each logged film once.</p><div class="stats-detail"><div class="stats-panel"><h3>Your favorites</h3>${top.length ? top.map((item) => `<div class="stat-line"><button class="title-button" data-action="details" data-key="${keyOf(item)}">${escapeHTML(titleOf(item))}</button><span>${Number(item.rating)} / 10</span></div>`).join("") : '<p class="small muted">Your highest-rated watches will appear here.</p>'}</div><div class="stats-panel"><h3>Your favorite genres</h3>${sortedGenres.length ? sortedGenres.map(([name, count]) => `<div class="stat-line"><span>${escapeHTML(name)}</span><span>${count} ${count === 1 ? "title" : "titles"}</span></div><div class="genre-bar"><span style="width:${(count / sortedGenres[0][1]) * 100}%"></span></div>`).join("") : '<p class="small muted">Log titles to discover your most-watched genres.</p>'}</div></div>`;
+    `<div class="stats-grid"><div class="stat"><strong>${number(stats.watchlistCount)}</strong><span>On your watchlist · ${stats.activeShows} active series</span></div><div class="stat"><strong>${number(stats.totalViewings)}</strong><span>Logged viewings · ${plural(stats.watchedMovies, "film")} & ${plural(stats.watchedShows, "show")}</span></div><div class="stat"><strong>${stats.ratedTitles ? Number(stats.avgRating).toFixed(1) : "—"}</strong><span>Your average rating · ${plural(stats.ratedTitles, "rated title")}</span></div><div class="stat"><strong>${(stats.movieMinutes / 60).toFixed(1)}<small class="small"> h</small></strong><span>Film time · includes repeat watches</span></div></div><p class="small muted" style="margin-top:16px">Film time uses known movie runtimes for each logged viewing; TV hours are excluded.${stats.unknownRuntimeViewings ? " " + plural(stats.unknownRuntimeViewings, "film viewing") + (stats.unknownRuntimeViewings === 1 ? " has an unknown runtime." : " have unknown runtimes.") : ""}${stats.unknownDateViewings ? " " + plural(stats.unknownDateViewings, "viewing") + (stats.unknownDateViewings === 1 ? " has an unknown date." : " have unknown dates.") : ""}</p><div class="stats-detail"><div class="stats-panel"><h3>Your highest rated</h3>${top.length ? top.map((item) => `<div class="stat-line"><button class="title-button" data-action="details" data-key="${keyOf(item)}">${escapeHTML(titleOf(item))}</button><span>${item.rating} / 10</span></div>`).join("") : '<p class="small muted">Your highest-rated watches will appear here.</p>'}</div><div class="stats-panel"><h3>Your favorite genres</h3>${sortedGenres.length ? sortedGenres.map(([name, count]) => `<div class="stat-line"><span>${escapeHTML(name)}</span><span>${count} ${count === 1 ? "title" : "titles"}</span></div><div class="genre-bar"><span style="width:${(count / sortedGenres[0][1]) * 100}%"></span></div>`).join("") : '<p class="small muted">Log titles to discover your most-watched genres.</p>'}</div><div class="stats-panel"><h3>Recent viewing activity</h3>${
+      stats.monthlyCounts.length
+        ? stats.monthlyCounts
+            .slice(-8)
+            .map(
+              (month) =>
+                `<div class="stat-line"><span>${escapeHTML(month.month)}</span><span>${month.count} ${month.count === 1 ? "viewing" : "viewings"}</span></div>`,
+            )
+            .join("")
+        : '<p class="small muted">Dated viewings will appear here.</p>'
+    }</div><div class="stats-panel"><h3>Your personal lists</h3>${
+      stats.topTags.length
+        ? stats.topTags
+            .slice(0, 8)
+            .map(
+              (tag) =>
+                `<div class="stat-line"><span>${escapeHTML(tag.tag)}</span><span>${tag.count} ${tag.count === 1 ? "title" : "titles"}</span></div>`,
+            )
+            .join("")
+        : '<p class="small muted">Add list names to a record, such as Weekend picks or With family.</p>'
+    }</div></div>`;
 }
 function updateHiddenCount() {
   $("hidden-count").textContent =
     `${hiddenKeys().length} ${hiddenKeys().length === 1 ? "title is" : "titles are"} hidden from discovery and suggestions.`;
   $("restore-hidden").disabled = !hiddenKeys().length;
+  $("hidden-list").innerHTML = hiddenKeys()
+    .slice(0, 50)
+    .map((key) => {
+      const item =
+        itemCache.get(key) || allRecords().find((x) => keyOf(x) === key);
+      return `<div><span>${escapeHTML(item ? titleOf(item) : key.replace("movie-", "Movie #").replace("tv-", "TV #"))}</span><button class="text-btn" data-restore-key="${escapeHTML(key)}">Restore</button></div>`;
+    })
+    .join("");
+  $("backup-status").textContent = preferences.lastBackup
+    ? `Last backup exported: ${new Date(preferences.lastBackup).toLocaleString()}`
+    : "No backup has been exported from this browser yet.";
 }
 function openData() {
   updateHiddenCount();
@@ -824,6 +1561,8 @@ function exportData() {
     link.click();
     link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+    savePreferences({ lastBackup: new Date().toISOString() });
+    updateHiddenCount();
     toast("Backup exported. Keep it somewhere safe.");
   } catch (error) {
     toast(error.message);
@@ -838,10 +1577,14 @@ async function importData(file) {
   }
   try {
     const text = await file.text();
+    const before = JSON.stringify(store.getSnapshot());
     store.importData(text);
     $("import-message").textContent =
-      `Import complete. Your collection now has ${library.watchlist.length} watchlist titles and ${library.watched.length} watched titles.`;
-    toast("Backup merged with your collection.", true);
+      `Import complete. Your collection now has ${plural(library.watchlist.length, "watchlist title")} and ${plural(library.watched.length, "watched title")}.`;
+    toast(
+      "Backup merged with your collection.",
+      before !== JSON.stringify(store.getSnapshot()),
+    );
   } catch (error) {
     $("import-message").textContent = error.message;
   } finally {
@@ -858,6 +1601,72 @@ function setTheme(theme) {
     theme === "dark" ? "#101715" : "#f6f7f1";
 }
 
+function changeExplore() {
+  if (!$("discover-form").reportValidity()) return;
+  let f = readFilters();
+  if (f.mediaType === "tv") {
+    f.personId = "";
+    f.personName = "";
+    f.runtimeMin = "";
+    f.runtimeMax = "";
+  }
+  if (f.sort === "trending") {
+    f.personId = "";
+    f.personName = "";
+    f.runtimeMin = "";
+    f.runtimeMax = "";
+    f.watchProviderId = "";
+    f.watchProviderName = "";
+  }
+  $("search-input").value = "";
+  runDiscovery({ filters: f });
+}
+function resetDiscovery() {
+  state.filters = { ...defaults, watchRegion: preferences.watchRegion || "US" };
+  state.selectedPerson = null;
+  $("search-input").value = "";
+  $("person-query").value = "";
+  $("person-results").innerHTML = "";
+  syncFilters(state.filters);
+  runDiscovery({ filters: state.filters });
+}
+function runPreset(preset) {
+  const f = { ...defaults, watchRegion: preferences.watchRegion || "US" };
+  if (preset === "tv") Object.assign(f, { mediaType: "tv", sort: "rating" });
+  if (preset === "short") Object.assign(f, { runtimeMax: 120, minRating: 7 });
+  if (preset === "recent")
+    Object.assign(f, {
+      yearFrom: String(new Date().getFullYear() - 1),
+      sort: "popular",
+    });
+  $("search-input").value = "";
+  syncFilters(f);
+  runDiscovery({ filters: f });
+}
+function clearLibraryFilters() {
+  [
+    "library-search",
+    "library-genre",
+    "library-rating",
+    "library-tag",
+    "library-priority",
+    "library-progress",
+  ].forEach((id) => ($(id).value = ""));
+  $("library-type").value = "all";
+  $("library-favorites").checked = false;
+  renderLibrary();
+}
+function resetRecommendations() {
+  state.recOffset = 0;
+  seenRecommendations.clear();
+  recommendationCursors.clear();
+  populateRecommendationSeeds();
+  loadRecommendations();
+}
+function itemForKey(key) {
+  return allRecords().find((x) => keyOf(x) === key) || itemCache.get(key);
+}
+
 $("discover-form").addEventListener("submit", (event) => {
   event.preventDefault();
   runDiscovery({ parse: true });
@@ -869,57 +1678,92 @@ $("discover-form").addEventListener("submit", (event) => {
   "sort-filter",
   "min-votes",
   "result-limit",
-].forEach((id) =>
-  $(id).addEventListener("change", () => {
-    if ($("discover-form").reportValidity()) runDiscovery();
-  }),
-);
+  "min-rating",
+  "runtime-max",
+  "original-language",
+  "watch-provider",
+  "person-role",
+].forEach((id) => $(id).addEventListener("change", changeExplore));
 $("media-type-filter").addEventListener("change", () => {
   populateGenres($("media-type-filter").value);
-  runDiscovery();
+  $("watch-provider").value = "";
+  changeExplore();
+  if ($("advanced-filters").open) loadProviderOptions();
 });
-$("reset-filters").addEventListener("click", resetDiscovery);
+$("watch-region").addEventListener("change", () => {
+  savePreferences({ watchRegion: $("watch-region").value });
+  $("watch-provider").value = "";
+  loadProviderOptions();
+  changeExplore();
+});
+$("advanced-filters").addEventListener("toggle", () => {
+  if ($("advanced-filters").open) loadProviderOptions();
+});
+$("find-person").addEventListener("click", findPerson);
+$("person-query").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    findPerson();
+  }
+});
+function clearTitleSearch(filters = {}) {
+  state.discoveryController?.abort();
+  state.busy = false;
+  state.results = [];
+  state.resultInfo = null;
+  state.filters = normalizeFilters({
+    ...filters,
+    mode: "search",
+    query: "",
+    mediaType: $("search-type").value,
+    includeUpcoming: $("search-upcoming").checked,
+    limit: 30,
+  });
+  setMode("search");
+  $("results-title").textContent = "Search movies & TV shows";
+  $("results-count").textContent = "";
+  $("results-kicker").textContent = "TITLE SEARCH";
+  $("query-summary").hidden = true;
+  $("active-filters").innerHTML = "";
+  $("discover-grid").removeAttribute("aria-busy");
+  $("discover-grid").innerHTML = empty(
+    "What are you looking for?",
+    "Search a title across movies and TV, including upcoming releases.",
+  );
+  $("discover-message").innerHTML = "";
+  $("load-more").hidden = true;
+  saveLocation();
+}
 $("search-input").addEventListener("search", () => {
-  if (!$("search-input").value) runDiscovery({ parse: true });
+  if (!$("search-input").value && state.uiMode === "search") clearTitleSearch();
 });
-function resetDiscovery() {
-  state.filters = { ...defaults };
-  $("search-input").value = "";
-  syncFilters(state.filters);
-  runDiscovery();
-}
-function runPreset(preset) {
-  const f = { ...defaults };
-  let text = "";
-  if (preset === "animation") {
-    Object.assign(f, {
-      genreId: "16",
-      yearFrom: "2000",
-      yearTo: String(new Date().getFullYear()),
-      sort: "rating",
-    });
-    text = "top 50 animated movies since 2000";
-  }
-  if (preset === "scifi") {
-    Object.assign(f, {
-      genreId: "878",
-      yearFrom: "2010",
-      yearTo: "2019",
-      sort: "rating",
-    });
-    text = "best 50 sci-fi movies between 2010 and 2019";
-  }
-  state.filters = f;
-  syncFilters(f);
-  $("search-input").value = text;
-  runDiscovery();
-}
+["search-type", "search-upcoming"].forEach((id) =>
+  $(id).addEventListener("change", () => {
+    if (state.uiMode === "search") {
+      if (!$("search-input").value.trim()) {
+        clearTitleSearch();
+        return;
+      }
+      runDiscovery({ parse: true });
+    }
+  }),
+);
+$("reset-filters").addEventListener("click", resetDiscovery);
+$("hide-watched").addEventListener("change", () => {
+  savePreferences({ hideWatched: $("hide-watched").checked });
+  runDiscovery({ filters: state.filters });
+});
+$("load-more").addEventListener("click", () => runDiscovery({ append: true }));
 [
   "library-search",
   "library-type",
   "library-genre",
   "library-sort",
   "library-rating",
+  "library-tag",
+  "library-priority",
+  "library-progress",
+  "library-favorites",
 ].forEach((id) =>
   $(id).addEventListener(
     id === "library-search" ? "input" : "change",
@@ -938,11 +1782,19 @@ $("restore-hidden").addEventListener("click", () => {
     safeMutation(() => store.restoreHidden(), "Hidden titles restored.") &&
     state.view === "discover"
   )
-    runDiscovery();
+    runDiscovery({ filters: state.filters });
 });
 $("undo-button").addEventListener("click", () => {
   try {
+    const hiddenBefore = JSON.stringify(hiddenKeys());
     store.undo();
+    if ($("movie-dialog").open && !recordDirty && $("record-form"))
+      renderDetail(state.detailItem);
+    if (
+      state.view === "discover" &&
+      hiddenBefore !== JSON.stringify(hiddenKeys())
+    )
+      runDiscovery({ filters: state.filters });
     toast("Last change undone.");
   } catch (error) {
     toast(error.message);
@@ -961,7 +1813,12 @@ $("theme-toggle").addEventListener("click", () => {
     toast("Theme changed for this visit. Browser storage is unavailable.");
   }
 });
-$("refresh-recommendations").addEventListener("click", loadRecommendations);
+$("refresh-recommendations").addEventListener("click", () => {
+  state.recOffset += 4;
+  loadRecommendations();
+});
+$("rec-type").addEventListener("change", resetRecommendations);
+$("rec-seed").addEventListener("change", resetRecommendations);
 for (const dialog of [$("movie-dialog"), $("data-dialog")]) {
   dialog.addEventListener("cancel", (event) => {
     event.preventDefault();
@@ -1018,27 +1875,123 @@ document.addEventListener("click", async (event) => {
     runPreset(button.dataset.preset);
     return;
   }
+  if (button.dataset.mode) {
+    if (button.dataset.mode === "discover") {
+      $("search-input").value = "";
+      syncFilters(state.exploreFilters);
+      runDiscovery({ filters: state.exploreFilters });
+    } else {
+      const query = state.filters.mode === "search" ? state.filters.query : "";
+      $("search-type").value = "all";
+      $("search-input").value = query;
+      if (query) {
+        setMode("search");
+      } else clearTitleSearch();
+      $("search-input").focus();
+    }
+    return;
+  }
+  if (button.dataset.display) {
+    state.display = button.dataset.display;
+    savePreferences({ libraryDisplay: state.display });
+    renderLibrary();
+    return;
+  }
+  if (button.dataset.personId) {
+    const person = peopleCache.get(button.dataset.personId);
+    if (!person) return;
+    state.selectedPerson = person;
+    $("person-results").innerHTML = "";
+    changeExplore();
+    return;
+  }
+  if (button.dataset.clearFilter) {
+    const f = { ...state.filters },
+      key = button.dataset.clearFilter;
+    if (key === "years") {
+      f.yearFrom = "";
+      f.yearTo = "";
+    } else if (key === "personId") {
+      f.personId = "";
+      f.personName = "";
+    } else if (key === "watchProviderId") {
+      f.watchProviderId = "";
+      f.watchProviderName = "";
+    } else f[key] = key === "minRating" ? 0 : "";
+    syncFilters(f);
+    runDiscovery({ filters: f });
+    return;
+  }
+  if (button.dataset.restoreKey) {
+    const [type, id] = button.dataset.restoreKey.split("-");
+    if (
+      safeMutation(
+        () => store.setHidden(Number(id), type, false),
+        "Title restored.",
+      ) &&
+      state.view === "discover"
+    )
+      runDiscovery({ filters: state.filters });
+    return;
+  }
   const action = button.dataset.action;
   if (!action) return;
   const item = button.dataset.key
-    ? getSaved(itemCache.get(button.dataset.key) || {}) ||
-      itemCache.get(button.dataset.key)
+    ? itemForKey(button.dataset.key)
     : state.detailItem;
   switch (action) {
     case "details":
-      if (recordDirty && !confirm("Discard your unsaved record changes?"))
-        return;
+      if (recordDirty && !confirm("Discard your unsaved changes?")) return;
       recordDirty = false;
       openDetails(item);
       break;
     case "save-watchlist":
-      saveCard(item, "watchlist");
+      saveCard(item);
       break;
-    case "save-watched":
+    case "draft-watched":
       saveCard(item, "watched");
       break;
+    case "track-tv":
+      openDetails(
+        item,
+        !getSaved(item) ||
+          !getSaved(item).progress ||
+          getSaved(item).progress.status === "planned"
+          ? { status: "watching" }
+          : null,
+      );
+      break;
+    case "favorite":
+      toggleFavorite(item);
+      break;
+    case "episode-total":
+      $("record-total").value = button.dataset.count;
+      markDirty("record-total");
+      break;
+    case "log-again":
+      if (recordDirty && !confirm("Discard your unsaved changes?")) return;
+      recordDirty = false;
+      openDetails(item, { status: "watched", newLog: true });
+      break;
+    case "edit-log":
+      openLogEditor(item, button.dataset.logId);
+      break;
+    case "remove-log":
+      if (
+        safeMutation(
+          () => store.removeLog(item.id, typeOf(item), button.dataset.logId),
+          "Viewing removed from history.",
+        )
+      ) {
+        recordDirty = false;
+        renderDetail(state.detailItem);
+      }
+      break;
     case "retry-discovery":
-      runDiscovery();
+      runDiscovery({ filters: state.filters });
+      break;
+    case "load-more":
+      runDiscovery({ append: true });
       break;
     case "reset-discovery":
       resetDiscovery();
@@ -1056,12 +2009,15 @@ document.addEventListener("click", async (event) => {
       loadCollection(Number(button.dataset.id));
       break;
     case "back-detail":
+      if (recordDirty && !confirm("Discard your unsaved changes?")) return;
+      recordDirty = false;
+      state.detailDraft = null;
       renderDetail(state.detailItem);
       break;
     case "remove-record":
       if (
         recordDirty &&
-        !confirm("Discard your unsaved record changes and remove this title?")
+        !confirm("Discard your unsaved changes and remove this title?")
       )
         return;
       if (
@@ -1075,8 +2031,7 @@ document.addEventListener("click", async (event) => {
       }
       break;
     case "hide-title":
-      if (recordDirty && !confirm("Discard your unsaved record changes?"))
-        return;
+      if (recordDirty && !confirm("Discard your unsaved changes?")) return;
       if (
         safeMutation(
           () => store.setHidden(item.id, typeOf(item), true),
@@ -1085,18 +2040,27 @@ document.addEventListener("click", async (event) => {
       ) {
         recordDirty = false;
         closeDialog($("movie-dialog"));
-        if (state.view === "discover") runDiscovery();
+        if (state.view === "discover") runDiscovery({ filters: state.filters });
       }
+      break;
+    case "hide-recommendation":
+      safeMutation(
+        () => store.setHidden(item.id, typeOf(item), true),
+        "Suggestion hidden.",
+      );
       break;
     case "retry-recommendations":
       loadRecommendations();
       break;
+    case "reset-suggestions":
+      resetRecommendations();
+      break;
     case "reset-library":
-      ["library-search", "library-genre", "library-rating"].forEach(
-        (id) => ($(id).value = ""),
-      );
-      $("library-type").value = "all";
-      renderLibrary();
+      clearLibraryFilters();
+      break;
+    case "clear-person":
+      state.selectedPerson = null;
+      changeExplore();
       break;
   }
 });
@@ -1111,18 +2075,24 @@ try {
   } catch {
     setTheme("dark");
   }
+  state.display = ["grid", "list", "history"].includes(
+    preferences.libraryDisplay,
+  )
+    ? preferences.libraryDisplay
+    : "grid";
+  $("hide-watched").checked = !!preferences.hideWatched;
   const params = Object.fromEntries(new URLSearchParams(location.search));
-  try {
-    state.filters = normalizeFilters({ ...defaults, ...params });
-  } catch {
-    state.filters = { ...defaults };
-  }
+  state.filters = normalizeFilters({
+    ...defaults,
+    watchRegion: preferences.watchRegion || "US",
+    ...params,
+  });
   syncFilters(state.filters);
   $("search-input").value =
     state.filters.mode === "search" ? state.filters.query : "";
   updateLibrary();
   navigate(location.hash.slice(1) || "discover");
-  runDiscovery();
+  runDiscovery({ filters: state.filters });
 } catch (error) {
   reportStorageWarning(
     error.message ||

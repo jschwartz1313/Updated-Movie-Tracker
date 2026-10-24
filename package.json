@@ -1,11 +1,11 @@
 {
   "name": "movie-tracker",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "private": true,
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.js",
     "start": "python3 -m http.server 4173 --bind 127.0.0.1",
-    "check": "node --check app.js && node --check lib/discovery.js && node --check lib/storage.js"
+    "check": "node --check app.js && node --check lib/discovery.js && node --check lib/storage.js && node --check lib/library.js && node --check lib/app-model.js"
   }
 }
