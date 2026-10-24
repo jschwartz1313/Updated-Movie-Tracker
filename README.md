@@ -1,119 +1,73 @@
-# 🎬 Movie Tracker
+# Movie Tracker
 
-A simple, interactive website to track movies and TV shows you want to watch and have watched. Built with vanilla HTML, CSS, and JavaScript, with no framework or build step.
+A buildless movie and TV tracker with TMDB discovery and a browser-local viewing journal.
 
-## Features
+**Live:** [Movie Tracker](https://jschwartz1313.github.io/Updated-Movie-Tracker/)
 
-- **Browse & Search**: Search the TMDB database for movies and TV shows, or browse popular, trending, top-rated, and by-year picks
-- **Watchlist**: Keep track of movies you want to watch
-- **Watched List**: Track what you've already seen
-- **Rating System**: Rate movies from 1-10 with an intuitive star interface
-- **Recommendations**: Get personalized suggestions based on your watched items and ratings
-- **Statistics Dashboard**: View your watching habits, top-rated titles, and favorite genres
-- **Dark/Light Theme**: Toggle between dark and light modes (preference saved)
-- **Responsive Design**: Works great on desktop, tablet, and mobile devices
-- **Local Storage**: All your data is saved locally in your browser
+## Find something to watch
 
-## Quick Start
+Type a title or an explicit discovery request, for example:
 
-1. **Get a TMDB API Key** (free):
-   - Go to [themoviedb.org](https://www.themoviedb.org/)
-   - Create a free account
-   - Go to Settings > API and request an API key
-   - Copy your API key
+- `top 50 animated movies since 2000`
+- `best 25 sci-fi movies between 2000 and 2010`
+- `best sci-fi movies of the 2010s`
+- `top rated TV shows since 2015`
 
-2. **Add Your API Key**:
-   - Open `app.js`
-   - Find the line `const TMDB_API_KEY = '';`
-   - Paste your API key between the quotes: `const TMDB_API_KEY = 'your_key_here';`
-   - Save the file and reload the page
+Requests are translated into the visible type, genre, inclusive year range, ranking, vote threshold, and result count. Adjust any filter directly. Unsupported phrases stay title searches; the app does not invent filters or recommendations with an AI model.
 
-3. **Open the App**:
-   - Simply open `index.html` in your web browser
-   - That's it! No installation or build process needed
+Highest-rated discovery uses TMDB's global `vote_average.desc` order, with a default minimum of 500 votes, and retrieves additional pages to fill the requested count (up to 200). “Top” means TMDB community rating under the displayed filters; it is not a critic ranking. Popularity and weekly trending use TMDB's own rankings. Future-dated releases are excluded. Hidden titles are skipped and backfilled from later pages.
 
-## How to Use
+Title search follows TMDB relevance and honors media type, genre, and date filters. Votes and sorting apply to ranked discovery, so those controls are disabled during title searches. A scan is limited to 25 pages; incomplete results are clearly labeled. Results and filters can be bookmarked or shared through the URL.
 
-### Browsing and Searching
-1. Open the `Browse` tab
-2. Type a movie or TV show title in the search box, or use the browse filters
-3. Click "Search" or press Enter
-4. Browse results with posters, years, streaming info, and collection/franchise drill-ins
+## Keep a reliable record
 
-### Adding Movies
-- **To Watchlist**: Click the "+ Watchlist" button on any movie
-- **To Watched**: Click the "✓ Watched" button (automatically removes from watchlist if present)
+- Save a watchlist, log watched movies and TV series, and edit personal ratings (1–10, in half-point steps), date watched, and notes.
+- Changing status preserves your personal record. Movies and TV series with the same numeric TMDB identifier remain separate.
+- Filter or search your own collection, explore official movie collections, and check US streaming/rental/purchase availability via JustWatch through TMDB.
+- See suggestions based on watched titles you rated at least 7, or have not rated. Titles already saved or hidden are excluded.
+- Insights distinguish your personal ratings from TMDB community ratings. Film hours count known movie runtimes once and exclude TV-series runtimes.
+- Export a JSON backup under **Your data**. Import merges records, preserving existing ratings and notes. Removal and hiding offer one-step Undo.
 
-### Rating Movies
-1. Go to the "Watched" tab
-2. Click "Rate" on any movie
-3. Click the stars to rate from 1-10
-4. Your rating is saved automatically
+## Storage and compatibility
 
-### Recommendations and Statistics
-- Click the "For You" tab to see recommendation sections based on your collection
-- Click the "Stats" tab to see:
-  - Total items in your collection
-  - Number of watched items
-  - Your average rating
-  - Total hours watched
-  - Your top-rated titles
-  - Favorite genres
+The app keeps the original `movieTrackerData`, `hiddenItems`, and `theme` localStorage keys. Existing valid records are loaded without rewriting them. Legacy `review`, `addedDate`, and ISO watched dates are supported. New records use the version 2 schema, with hidden IDs included in the same atomic library write.
 
-### Theme Toggle
-- Click the moon/sun icon in the header to switch between dark and light modes
-- Your preference is automatically saved
+The app confirms saves only after the canonical data is written successfully. Invalid imports are rejected before any changes. Damaged existing data is salvaged where possible, with a warning, and the original text is copied to a recovery key before a later edit replaces it. Storage failures and conflicting changes from another tab are reported without erasing the previous library.
 
-## Technical Details
+**Data stays in this browser on this device. There is no account or automatic cross-device synchronization.** Export backups before clearing site data or switching browsers. Private browsing may discard records when its window closes. Metadata searches and availability checks contact TMDB; notes and ratings are not uploaded. The existing public TMDB API key is retained for compatibility with static GitHub Pages hosting.
 
-- **No Dependencies**: Pure HTML, CSS, and JavaScript
-- **No Build Process**: Just open and run
-- **Data Storage**: localStorage (stays in your browser)
-- **API**: The Movie Database (TMDB) API for browsing, search, details, and recommendations
-- **Responsive**: Mobile-friendly design
+## Run locally
 
-## Project Structure
+Serve the directory over HTTP; ES modules require a web server rather than opening `index.html` directly:
 
-```
-Movie-Tracker/
-├── index.html      # Main HTML file
-├── style.css       # All styles and theming
-├── app.js          # Application logic
-└── README.md       # This file
+```sh
+python3 -m http.server 4173 --bind 127.0.0.1
 ```
 
-## Browser Support
+Open `http://127.0.0.1:4173/`. No dependencies or build step are needed. The API key is configured in `lib/discovery.js`.
 
-Works on all modern browsers:
-- Chrome/Edge (latest)
-- Firefox (latest)
-- Safari (latest)
-- Mobile browsers
+## Verify changes
 
-## Data Privacy
+Requires Node.js 22 or later for the built-in test runner:
 
-All your data is stored locally in your browser using `localStorage`. Nothing is sent to any server other than TMDB API requests for browsing, search, details, and recommendations. Your watchlist, ratings, hidden items, and theme preference stay on your device.
+```sh
+npm test
+npm run check
+```
 
-## Future Enhancements
+Tests cover query parsing, API filter parameters and pagination, hidden-title backfilling, HTTP errors, partial results, timeouts, cancellation, legacy migration, status changes, duplicates, quota failure, recovery, import validation, export, undo, and cross-tab conflicts. GitHub Actions runs these checks for pushes and pull requests.
 
-Want to add more features? Some ideas:
-- Export/import data as JSON
-- Movie recommendations based on your ratings
-- Filter by genre
-- Search within your collection
-- Movie trailers
-- Cast and crew information
-- User reviews/notes
+Browser checks should cover title and natural-language searches, quick consecutive searches, movie/TV switching, watchlist → watched → rating/notes/date → reload, status changes, backup round-trip, collections, providers, keyboard dismissal, and mobile layout.
+
+## Structure
+
+- `index.html` — accessible app structure and forms
+- `style.css` — responsive light and dark themes
+- `app.js` — UI, request ordering, records, details, recommendations and insights
+- `lib/discovery.js` — TMDB client, explicit query parsing and ranked pagination
+- `lib/storage.js` — durable library, migration, validation, backup and recovery
+- `tests/` — dependency-free regression tests
 
 ## Credits
 
-- Movie data and images provided by [The Movie Database (TMDB)](https://www.themoviedb.org/)
-- Built with ❤️ using vanilla JavaScript
-
-## License
-
-Free to use and modify as you like!
-
----
-
-**Need help?** Make sure you've added your TMDB API key in `app.js`. If the app still has issues, clear bad local data in DevTools `localStorage` or check the browser console for errors.
+Data and images are provided by [TMDB](https://www.themoviedb.org/). This product uses the TMDB API but is not endorsed or certified by TMDB. Availability data is supplied by JustWatch via TMDB.

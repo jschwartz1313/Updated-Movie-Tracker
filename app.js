@@ -1,3412 +1,1131 @@
-// TMDB API Configuration
-const TMDB_API_KEY = 'd954579ffe639c8a36b86cb2849c2ed1'; // Add your TMDB API key here before running search or browse features.
-const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
-const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p/w500';
+import {
+  GENRES,
+  parseDiscoveryQuery,
+  normalizeFilters,
+  describeFilters,
+  createMovieClient,
+} from "./lib/discovery.js";
+import { createLibraryStore } from "./lib/storage.js";
 
-// App State
-let movies = {
-    watchlist: [],
-    watched: []
+const $ = (id) => document.getElementById(id);
+const escapeHTML = (value) =>
+  String(value ?? "").replace(
+    /[&<>"']/g,
+    (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
+        c
+      ],
+  );
+const imageURL = (path, size = "w342") =>
+  typeof path === "string" && /^\/[\w./-]+$/.test(path)
+    ? `https://image.tmdb.org/t/p/${size}${path}`
+    : "";
+const typeOf = (item) => item.mediaType || item.media_type || "movie";
+const keyOf = (item) => `${typeOf(item)}-${Number(item.id)}`;
+const titleOf = (item) => item.title || item.name || "Untitled";
+const yearOf = (item) =>
+  String(item.release_date || item.first_air_date || "").slice(0, 4);
+const today = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 };
-
-// Track media type for each item
-const MEDIA_TYPE_MOVIE = 'movie';
-const MEDIA_TYPE_TV = 'tv';
-
-// Track current browse/search state for re-rendering
-let currentBrowseState = {
-    mode: 'browse', // 'browse' or 'search'
-    results: [],
-    mediaType: 'movie',
-    query: '',
-    year: null,
-    yearMode: 'best',
-    genreId: '',
-    activeFilter: 'popular',
-    collections: [],
-    franchiseResults: [],
-    collectionId: null,
-    previousState: null
+const number = (n) => Number(n || 0).toLocaleString();
+const defaults = {
+  mode: "discover",
+  query: "",
+  mediaType: "movie",
+  genreId: "",
+  yearFrom: "",
+  yearTo: "",
+  sort: "popular",
+  minVotes: 500,
+  limit: 50,
 };
+const client = createMovieClient();
+let storage;
+try {
+  storage = window.localStorage;
+} catch {
+  storage = {
+    getItem() {
+      throw Error("Browser storage is unavailable.");
+    },
+    setItem() {
+      throw Error("Browser storage is unavailable.");
+    },
+  };
+}
+const store = createLibraryStore(storage);
+let library = { watchlist: [], watched: [], hiddenItems: [] };
+const state = {
+  view: "discover",
+  filters: { ...defaults },
+  results: [],
+  resultInfo: null,
+  recommendations: [],
+  recommendationsReady: false,
+  discoveryController: null,
+  recommendationController: null,
+  detailController: null,
+  detailItem: null,
+  detailSequence: 0,
+  detailPresentation: 0,
+  queryRecognized: false,
+  busy: false,
+};
+const itemCache = new Map();
+const detailCache = new Map();
+let toastTimer;
+let recordDirty = false;
 
-// Initialize App
-document.addEventListener('DOMContentLoaded', () => {
-    loadMoviesFromStorage();
-    initializeEventListeners();
-    updateCounts();
-    updateStats();
-    loadTheme();
-
-    // Initialize the default browse view
-    initializeBrowse();
-
-    // Show API key reminder if not set
-    if (!hasTMDBApiKey()) {
-        showToast('Add your TMDB API key in app.js to enable browse, search, and recommendations.');
+function getSaved(item) {
+  const key = keyOf(item);
+  return (
+    library.watched.find((x) => keyOf(x) === key) ||
+    library.watchlist.find((x) => keyOf(x) === key)
+  );
+}
+function getStatus(item) {
+  const key = keyOf(item);
+  return library.watched.some((x) => keyOf(x) === key)
+    ? "watched"
+    : library.watchlist.some((x) => keyOf(x) === key)
+      ? "watchlist"
+      : "";
+}
+function hiddenKeys() {
+  return library.hiddenItems || [];
+}
+function normalizeItem(item) {
+  const mt = typeOf(item);
+  const genres =
+    Array.isArray(item.genres) && item.genres.length
+      ? item.genres
+      : (Array.isArray(item.genre_ids) ? item.genre_ids : [])
+          .map((id) =>
+            (GENRES[mt] || []).find((g) => Number(g.id) === Number(id)),
+          )
+          .filter(Boolean);
+  return {
+    ...item,
+    mediaType: mt,
+    title: titleOf(item),
+    release_date: item.release_date || item.first_air_date || "",
+    genres,
+    runtime: item.runtime || item.episode_run_time?.[0] || null,
+    cast: (Array.isArray(item.credits?.cast)
+      ? item.credits.cast
+      : Array.isArray(item.cast)
+        ? item.cast
+        : []
+    )
+      .filter((p) => p && typeof p.name === "string")
+      .slice(0, 12),
+    crew: (Array.isArray(item.credits?.crew)
+      ? item.credits.crew
+      : Array.isArray(item.crew)
+        ? item.crew
+        : []
+    )
+      .filter(
+        (p) =>
+          p &&
+          typeof p.name === "string" &&
+          (!p.job || ["Director", "Writer", "Creator"].includes(p.job)),
+      )
+      .slice(0, 12),
+    externalIds: item.external_ids || item.externalIds || {},
+    watchProviders: item["watch/providers"]?.results?.US || item.watchProviders,
+  };
+}
+function toast(message, undo = false) {
+  clearTimeout(toastTimer);
+  $("toast-text").textContent = message;
+  $("undo-button").hidden = !undo;
+  $("toast").hidden = false;
+  toastTimer = setTimeout(
+    () => {
+      $("toast").hidden = true;
+    },
+    undo ? 12000 : 6500,
+  );
+}
+function reportStorageWarning(message = "") {
+  $("storage-warning").textContent = message;
+  $("storage-warning").hidden = !message;
+}
+function safeMutation(action, message, undo = true) {
+  try {
+    action();
+    toast(message, undo);
+    return true;
+  } catch (error) {
+    toast(error.message);
+    return false;
+  }
+}
+function readFilters() {
+  return normalizeFilters({
+    mode: state.filters.mode,
+    query: state.filters.query,
+    mediaType: $("media-type-filter").value,
+    genreId: $("genre-filter").value,
+    yearFrom: $("year-from").value,
+    yearTo: $("year-to").value,
+    sort: $("sort-filter").value,
+    minVotes: Number($("min-votes").value),
+    limit: Number($("result-limit").value),
+  });
+}
+function setSelect(id, value, label = value) {
+  const el = $(id);
+  if (![...el.options].some((o) => o.value === String(value)))
+    el.add(new Option(String(label), String(value)));
+  el.value = String(value);
+}
+function populateGenres(mediaType = "movie", selected = "") {
+  $("genre-filter").innerHTML =
+    '<option value="">All genres</option>' +
+    (GENRES[mediaType] || [])
+      .map(
+        (g) => `<option value="${Number(g.id)}">${escapeHTML(g.name)}</option>`,
+      )
+      .join("");
+  $("genre-filter").value = selected;
+}
+function syncFilters(f) {
+  $("media-type-filter").value = f.mediaType;
+  populateGenres(f.mediaType, f.genreId);
+  $("year-from").value = f.yearFrom || "";
+  $("year-to").value = f.yearTo || "";
+  $("sort-filter").value = f.sort;
+  setSelect("min-votes", f.minVotes, `${number(f.minVotes)}+ votes`);
+  setSelect("result-limit", f.limit, `${f.limit} titles`);
+  $("sort-filter").disabled = f.mode === "search";
+  $("min-votes").disabled = f.mode === "search" || f.sort !== "rating";
+  $("filter-help").textContent =
+    f.mode === "search"
+      ? "Title results use TMDB relevance, your type, genre and date filters. Clear the search to return to ranked discovery."
+      : "Ratings are TMDB community scores. Minimum votes applies to highest-rated rankings. Released titles only.";
+}
+function saveLocation() {
+  const f = state.filters;
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(f))
+    if (
+      Object.hasOwn(defaults, key) &&
+      String(value) !== String(defaults[key]) &&
+      value !== ""
+    )
+      params.set(key, value);
+  history.replaceState(
+    null,
+    "",
+    `${location.pathname}${params.size ? "?" + params : ""}#${state.view}`,
+  );
+}
+function resultTitle(f) {
+  if (f.mode === "search") return `Results for “${f.query}”`;
+  const genre = (GENRES[f.mediaType] || []).find(
+    (g) => String(g.id) === String(f.genreId),
+  )?.name;
+  const media = f.mediaType === "tv" ? "TV shows" : "movies";
+  return `${{ rating: `Top ${f.limit}`, popular: "Popular", newest: "Newest", trending: "Trending" }[f.sort] || "Explore"} ${genre ? genre.toLowerCase() + " " : ""}${media}${f.yearFrom ? ` · ${f.yearFrom}${f.yearTo && f.yearTo !== f.yearFrom ? "–" + f.yearTo : f.yearTo === f.yearFrom ? "" : " onward"}` : f.yearTo ? " · through " + f.yearTo : ""}`;
+}
+async function runDiscovery({ parse = false } = {}) {
+  state.discoveryController?.abort();
+  const controller = new AbortController();
+  state.discoveryController = controller;
+  try {
+    let filters = readFilters();
+    if (parse) {
+      const input = $("search-input").value.trim();
+      filters = input
+        ? parseDiscoveryQuery(input, filters)
+        : { ...filters, mode: "discover", query: "" };
+      state.queryRecognized = Boolean(filters.recognized);
     }
+    filters = normalizeFilters(filters);
+    state.filters = filters;
+    syncFilters(filters);
+    saveLocation();
+    state.busy = true;
+    state.results = [];
+    state.resultInfo = null;
+    $("results-title").textContent = resultTitle(filters);
+    $("results-kicker").textContent =
+      filters.mode === "search"
+        ? "TITLE SEARCH"
+        : filters.sort === "rating"
+          ? "COMMUNITY FAVORITES"
+          : "THE NEXT WATCH";
+    $("results-count").textContent = "Finding titles…";
+    $("query-summary").hidden = false;
+    $("query-summary").textContent = describeFilters(filters);
+    $("discover-message").innerHTML =
+      '<div class="loading" role="status"><span class="spinner" aria-hidden="true"></span>Searching the catalog…</div>';
+    $("discover-grid").setAttribute("aria-busy", "true");
+    $("discover-grid").innerHTML =
+      '<div class="skeleton" aria-hidden="true"></div>'.repeat(5);
+    const data = await client[
+      filters.mode === "search" ? "search" : "discover"
+    ](filters, {
+      signal: controller.signal,
+      excludeKeys: hiddenKeys().map((key) => key.replace("-", ":")),
+    });
+    if (controller !== state.discoveryController || controller.signal.aborted)
+      return;
+    state.results = data.results;
+    state.resultInfo = data;
+    state.busy = false;
+    renderDiscovery();
+  } catch (error) {
+    if (controller !== state.discoveryController || controller.signal.aborted)
+      return;
+    state.busy = false;
+    $("discover-grid").removeAttribute("aria-busy");
+    $("discover-grid").innerHTML = "";
+    $("results-count").textContent = "Search needs attention";
+    $("discover-message").innerHTML =
+      `<div class="notice warning" role="alert">${escapeHTML(error.message || "The catalog could not be reached. Please try again.")} <button class="text-btn" data-action="retry-discovery">Try again</button></div>`;
+  }
+}
+function renderDiscovery() {
+  if (state.busy) return;
+  $("discover-grid").removeAttribute("aria-busy");
+  const visible = state.results.filter((x) => !hiddenKeys().includes(keyOf(x)));
+  const info = state.resultInfo;
+  $("results-count").textContent = info
+    ? `${visible.length} shown${info.totalResultsExact && info.totalResults > visible.length ? " of " + number(info.totalResults) : ""}`
+    : "";
+  $("discover-message").innerHTML = info?.warning
+    ? `<div class="notice warning">${escapeHTML(info.warning)} <button class="text-btn" data-action="retry-discovery">Try again</button></div>`
+    : "";
+  if (state.results.length && visible.length < state.results.length)
+    $("discover-message").innerHTML +=
+      '<div class="notice">Hidden titles are excluded from these results. Restore them in Your data, or increase the result count.</div>';
+  renderCards($("discover-grid"), visible, {
+    rank: state.filters.sort === "rating" && state.filters.mode !== "search",
+  });
+  if (!visible.length)
+    $("discover-grid").innerHTML = empty(
+      "No titles found.",
+      "Try a wider year range, a different title or fewer filters.",
+      '<button class="btn secondary" data-action="reset-discovery">Reset search</button>',
+    );
+}
+function empty(title, text, action = "") {
+  return `<div class="empty"><h3>${escapeHTML(title)}</h3><p>${escapeHTML(text)}</p>${action}</div>`;
+}
+function renderCards(container, items, { rank = false } = {}) {
+  const fragment = document.createDocumentFragment();
+  items.forEach((item, index) => {
+    itemCache.set(keyOf(item), item);
+    const status = getStatus(item),
+      saved = getSaved(item),
+      key = keyOf(item);
+    const image = imageURL(item.poster_path);
+    const card = document.createElement("article");
+    card.className = "movie-card";
+    card.dataset.key = key;
+    const rating = Number(item.vote_average);
+    card.innerHTML = `<button class="poster-button" data-action="details" data-key="${key}" aria-label="Details for ${escapeHTML(titleOf(item))}">${image ? `<img class="movie-poster" src="${image}" alt="" loading="lazy" decoding="async" width="342" height="513">` : `<span class="poster-placeholder">${escapeHTML(titleOf(item))}</span>`}${rank ? `<span class="rank-badge">${index + 1}</span>` : ""}${status ? '<span class="saved-badge" aria-label="In your collection">✓</span>' : ""}${rating > 0 ? `<span class="score-badge" title="TMDB community rating · ${number(item.vote_count)} votes">★ ${rating.toFixed(1)}</span>` : ""}</button><div class="movie-info"><button class="title-button" data-action="details" data-key="${key}">${escapeHTML(titleOf(item))}</button><div class="movie-meta"><span>${escapeHTML(yearOf(item) || "Year unknown")}${saved?.rating && status === "watched" ? ` · Your rating ${saved.rating}/10` : ""}</span><span class="type">${typeOf(item) === "tv" ? "TV SERIES" : "FILM"}</span></div><div class="card-actions">${status === "watched" ? `<button class="saved" data-action="details" data-key="${key}">✓ Watched · Edit log</button>` : `<button class="${status === "watchlist" ? "saved" : ""}" data-action="${status === "watchlist" ? "details" : "save-watchlist"}" data-key="${key}">${status === "watchlist" ? "✓ Watchlist" : "+ Watchlist"}</button><button data-action="save-watched" data-key="${key}">Log watched</button>`}</div>${item._recommendationReason ? `<p class="card-note">Because you watched ${escapeHTML(item._recommendationReason)}</p>` : ""}</div>`;
+    const img = card.querySelector("img");
+    img?.addEventListener(
+      "error",
+      () => {
+        img.hidden = true;
+        const fallback = document.createElement("span");
+        fallback.className = "poster-placeholder";
+        fallback.textContent = titleOf(item);
+        img.after(fallback);
+      },
+      { once: true },
+    );
+    fragment.append(card);
+  });
+  container.replaceChildren(fragment);
+}
+function navigate(view, { focus = false } = {}) {
+  if (
+    !["discover", "watchlist", "watched", "recommendations", "stats"].includes(
+      view,
+    )
+  )
+    view = "discover";
+  if (view !== state.view) {
+    $("library-search").value = "";
+    $("library-genre").value = "";
+    $("library-rating").value = "";
+  }
+  state.view = view;
+  document.querySelectorAll(".view").forEach((el) => {
+    el.hidden =
+      el.id !==
+      (["watchlist", "watched"].includes(view)
+        ? "library-view"
+        : `${view}-view`);
+  });
+  document.querySelectorAll(".nav-btn").forEach((btn) => {
+    const active = btn.dataset.view === view;
+    btn.classList.toggle("active", active);
+    if (active) btn.setAttribute("aria-current", "page");
+    else btn.removeAttribute("aria-current");
+  });
+  if (["watchlist", "watched"].includes(view)) renderLibrary();
+  if (view === "stats") renderStats();
+  if (view === "recommendations") loadRecommendations();
+  saveLocation();
+  if (focus) $("main").focus({ preventScroll: true });
+}
+function renderLibrary() {
+  const watched = state.view === "watched";
+  const source = watched ? library.watched : library.watchlist;
+  $("library-title").textContent = watched
+    ? "Your viewing journal."
+    : "The watchlist.";
+  $("library-description").textContent = watched
+    ? "Every watch, every rating, every thought worth keeping."
+    : "Good finds, ready for the right night.";
+  $("library-rating-label").hidden = !watched;
+  const previousGenre = $("library-genre").value;
+  const genreMap = new Map(
+    source
+      .flatMap((item) => item.genres || [])
+      .map((g) => [String(g.id), g.name]),
+  );
+  $("library-genre").innerHTML =
+    '<option value="">All genres</option>' +
+    [...genreMap]
+      .sort((a, b) => a[1].localeCompare(b[1]))
+      .map(
+        ([id, name]) =>
+          `<option value="${escapeHTML(id)}">${escapeHTML(name)}</option>`,
+      )
+      .join("");
+  $("library-genre").value = genreMap.has(previousGenre) ? previousGenre : "";
+  const query = $("library-search").value.trim().toLocaleLowerCase(),
+    type = $("library-type").value,
+    genre = $("library-genre").value,
+    rating = $("library-rating").value;
+  let items = source.filter(
+    (item) =>
+      (type === "all" || typeOf(item) === type) &&
+      (!genre || (item.genres || []).some((g) => String(g.id) === genre)) &&
+      (!watched ||
+        !rating ||
+        (rating === "unrated"
+          ? !item.rating
+          : Number(item.rating) >= Number(rating))) &&
+      (!query ||
+        [
+          titleOf(item),
+          item.notes,
+          item.review,
+          ...(item.crew || []).map((p) => p.name),
+        ]
+          .join(" ")
+          .toLocaleLowerCase()
+          .includes(query)),
+  );
+  const sort = $("library-sort").value;
+  items = [...items].sort((a, b) =>
+    sort === "title"
+      ? titleOf(a).localeCompare(titleOf(b))
+      : sort === "year"
+        ? (yearOf(b) || "").localeCompare(yearOf(a) || "")
+        : sort === "rating"
+          ? (Number(b.rating) || 0) - (Number(a.rating) || 0)
+          : String(
+              watched ? b.watchedDate || "" : b.addedAt || b.addedDate || "",
+            ).localeCompare(
+              String(
+                watched ? a.watchedDate || "" : a.addedAt || a.addedDate || "",
+              ),
+            ),
+  );
+  $("library-result-title").textContent = watched
+    ? "Logged titles"
+    : "Saved for later";
+  $("library-count").textContent = `${items.length} of ${source.length} titles`;
+  renderCards($("library-grid"), items);
+  if (!items.length)
+    $("library-grid").innerHTML = empty(
+      source.length
+        ? "Nothing matches these filters."
+        : watched
+          ? "The opening scene."
+          : "Make a night of it.",
+      source.length
+        ? "Clear your search or adjust the collection filters."
+        : watched
+          ? "Log your first movie or show to start your viewing journal."
+          : "Save a few movies and shows to build your next-watch shortlist.",
+      `<button class="btn primary" data-action="${source.length ? "reset-library" : "go-discover"}">${source.length ? "Clear filters" : "Explore titles ↗"}</button>`,
+    );
+}
+function updateLibrary() {
+  library = store.getSnapshot();
+  reportStorageWarning(library.warning || "");
+  $("watchlist-count").textContent = library.watchlist.length;
+  $("watched-count").textContent = library.watched.length;
+  if (state.view === "discover") renderDiscovery();
+  if (["watchlist", "watched"].includes(state.view)) renderLibrary();
+  if (state.view === "stats") renderStats();
+  if (state.view === "recommendations") renderRecommendationCards();
+  updateHiddenCount();
+}
+function saveCard(item, status) {
+  const data = normalizeItem({ ...item, ...detailCache.get(keyOf(item)) });
+  if (
+    safeMutation(
+      () => store.saveItem(data, status),
+      status === "watched"
+        ? `Logged “${titleOf(item)}” as watched.`
+        : `Added “${titleOf(item)}” to your watchlist.`,
+    )
+  ) {
+    if (status === "watched") openDetails({ ...data, ...getSaved(data) });
+  }
+}
+function detailMarkup(item, warning = "") {
+  const saved = getSaved(item),
+    status = getStatus(item),
+    combined = normalizeItem({
+      ...saved,
+      ...item,
+      ...Object.fromEntries(
+        ["rating", "notes", "review", "watchedDate"]
+          .filter((k) => saved && Object.hasOwn(saved, k))
+          .map((k) => [k, saved[k]]),
+      ),
+    });
+  const image = imageURL(combined.poster_path),
+    rating = Number(combined.vote_average),
+    mt = typeOf(item);
+  const imdb = combined.externalIds?.imdb_id;
+  return `<div class="detail-header">${image ? `<img class="detail-poster" src="${image}" alt="Poster for ${escapeHTML(titleOf(item))}">` : '<div class="detail-poster"></div>'}<div><h2 id="detail-title">${escapeHTML(titleOf(item))}</h2><div class="movie-meta"><span>${escapeHTML(yearOf(combined) || "Year unknown")}</span><span>${mt === "tv" ? "TV series" : "Movie"}</span>${combined.runtime ? `<span>${Number(combined.runtime)} min${mt === "tv" ? " / episode" : ""}</span>` : ""}${rating ? `<span>★ ${rating.toFixed(1)} TMDB</span>` : ""}</div><div class="detail-genres">${(combined.genres || []).map((g) => `<span>${escapeHTML(g.name)}</span>`).join("")}</div><div class="detail-links"><a href="https://www.themoviedb.org/${mt}/${Number(item.id)}" target="_blank" rel="noopener noreferrer">View on TMDB ↗</a>${/^tt\d+$/.test(imdb) ? `<a href="https://www.imdb.com/title/${imdb}/" target="_blank" rel="noopener noreferrer">IMDb ↗</a>` : ""}</div></div></div><div id="detail-live-status">${warning ? `<div class="notice">${escapeHTML(warning)}</div>` : ""}</div><p class="detail-overview">${escapeHTML(combined.overview || "No overview is available for this title.")}</p><form id="record-form" class="record-panel"><h3>Your record</h3><div class="record-fields"><label>Status<select id="record-status"><option value="watchlist"${status === "watchlist" || !status ? " selected" : ""}>On my watchlist</option><option value="watched"${status === "watched" ? " selected" : ""}>Watched</option></select></label><label id="record-rating-label">Your rating<select id="record-rating"><option value="0">Not rated</option>${Array.from(
+    { length: 19 },
+    (_, i) => 1 + i / 2,
+  )
+    .map(
+      (n) =>
+        `<option value="${n}"${Number(combined.rating) === n ? " selected" : ""}>${n} / 10</option>`,
+    )
+    .join(
+      "",
+    )}</select></label><label id="record-date-label">Date watched<input type="date" id="record-date" max="${today()}" value="${escapeHTML((combined.watchedDate || today()).slice(0, 10))}"></label></div><label class="record-notes">Your notes<textarea id="record-notes" maxlength="20000" placeholder="What did you think? Who did you watch it with?">${escapeHTML(combined.notes || combined.review || "")}</textarea></label><div class="record-footer"><p>Your rating and notes stay with this title when you change its status.</p><button class="btn primary" type="submit">Save record</button></div><div id="record-message" class="form-error" role="alert"></div></form><div class="detail-section"><h3>Where to watch <span class="small muted">· United States</span></h3><div id="providers-content"><button class="btn secondary" data-action="providers">Check availability</button><p class="small muted">Availability provided by JustWatch via TMDB.</p></div></div>${combined.belongs_to_collection ? `<div class="detail-section"><button class="btn secondary" data-action="collection" data-id="${Number(combined.belongs_to_collection.id)}">Explore ${escapeHTML(combined.belongs_to_collection.name)} ↗</button></div>` : ""}${combined.crew?.length ? `<div class="detail-section"><h3>Behind the camera</h3><p>${combined.crew.map((p) => `${escapeHTML(p.name)}${p.job ? " · " + escapeHTML(p.job) : ""}`).join(" &nbsp; / &nbsp; ")}</p></div>` : ""}${combined.cast?.length ? `<div class="detail-section"><h3>Cast</h3><p>${combined.cast.map((p) => escapeHTML(p.name)).join(" · ")}</p></div>` : ""}<div class="detail-actions">${status ? '<button class="text-btn danger" data-action="remove-record">Remove from collection</button>' : "<span></span>"}<button class="text-btn" data-action="hide-title">Hide from discovery</button></div>`;
+}
+function renderDetail(item, warning = "") {
+  ++state.detailPresentation;
+  state.detailItem = item;
+  recordDirty = false;
+  $("detail-content").innerHTML = detailMarkup(item, warning);
+  syncRecordFields();
+  $("record-form").addEventListener("input", () => {
+    recordDirty = true;
+  });
+  $("record-status").addEventListener("change", syncRecordFields);
+  $("record-form").addEventListener("submit", saveRecord);
+}
+async function openDetails(item) {
+  if (!item) return;
+  state.detailController?.abort();
+  const controller = new AbortController();
+  state.detailController = controller;
+  const sequence = ++state.detailSequence;
+  const cached = detailCache.get(keyOf(item));
+  state.detailItem = normalizeItem({ ...item, ...cached });
+  const dialog = $("movie-dialog");
+  if (!dialog.open) dialog.showModal();
+  if (cached) {
+    renderDetail(cached);
+    return;
+  }
+  renderDetail(state.detailItem);
+  $("detail-live-status").innerHTML =
+    '<p class="small muted">Updating title details… You can edit your record now.</p>';
+  const presentation = state.detailPresentation;
+  try {
+    const details = normalizeItem(
+      await client.details(item.id, typeOf(item), {
+        signal: controller.signal,
+      }),
+    );
+    if (sequence !== state.detailSequence || controller.signal.aborted) return;
+    detailCache.set(keyOf(details), details);
+    if (
+      presentation === state.detailPresentation &&
+      !recordDirty &&
+      !document.activeElement?.closest("#record-form")
+    )
+      renderDetail(details);
+    else {
+      state.detailItem = details;
+      if ($("detail-live-status")) $("detail-live-status").textContent = "";
+    }
+  } catch (error) {
+    if (sequence !== state.detailSequence || controller.signal.aborted) return;
+    if ($("detail-live-status"))
+      $("detail-live-status").textContent =
+        "Live details could not be loaded. You can still save and edit this record. " +
+        error.message;
+  }
+}
+function syncRecordFields() {
+  const watched = $("record-status")?.value === "watched";
+  if (!$("record-rating-label")) return;
+  $("record-rating-label").hidden = !watched;
+  $("record-date-label").hidden = !watched;
+  $("record-date").required = watched;
+}
+function saveRecord(event) {
+  event.preventDefault();
+  const item = state.detailItem;
+  if (!item) return;
+  const status = $("record-status").value;
+  const date = $("record-date").value;
+  if (status === "watched" && (!date || date > today())) {
+    $("record-message").textContent =
+      "Choose a valid date watched, up to today.";
+    return;
+  }
+  const changes = { notes: $("record-notes").value };
+  if (status === "watched") {
+    changes.rating = Number($("record-rating").value);
+    changes.watchedDate = date;
+  }
+  try {
+    store.saveItem(normalizeItem(item), status, changes);
+    recordDirty = false;
+    closeDialog($("movie-dialog"));
+    toast("Your record is saved.", true);
+  } catch (error) {
+    $("record-message").textContent = error.message;
+  }
+}
+function closeDialog(dialog) {
+  if (
+    dialog.id === "movie-dialog" &&
+    recordDirty &&
+    !confirm("Discard your unsaved record changes?")
+  )
+    return false;
+  if (dialog.id === "movie-dialog") {
+    recordDirty = false;
+    state.detailController?.abort();
+    ++state.detailSequence;
+  }
+  dialog.close();
+  return true;
+}
+async function loadProviders() {
+  ++state.detailPresentation;
+  const item = state.detailItem;
+  if (!item) return;
+  const key = keyOf(item),
+    sequence = state.detailSequence,
+    target = $("providers-content");
+  if (!target) return;
+  target.innerHTML =
+    '<div class="loading"><span class="spinner"></span>Checking availability…</div>';
+  try {
+    const data = await client.providers(item.id, typeOf(item), {
+      signal: state.detailController?.signal,
+    });
+    if (
+      sequence !== state.detailSequence ||
+      key !== keyOf(state.detailItem) ||
+      !target.isConnected
+    )
+      return;
+    const us = data.results?.US;
+    const groups = [
+      ["flatrate", "Stream"],
+      ["free", "Free"],
+      ["ads", "With ads"],
+      ["rent", "Rent"],
+      ["buy", "Buy"],
+    ];
+    const html = groups
+      .filter(([k]) => us?.[k]?.length)
+      .map(
+        ([k, label]) =>
+          `<p><strong>${label}:</strong> ${us[k].map((p) => escapeHTML(p.provider_name)).join(", ")}</p>`,
+      )
+      .join("");
+    const link =
+      typeof us?.link === "string" &&
+      us.link.startsWith("https://www.themoviedb.org/")
+        ? us.link
+        : "";
+    $("providers-content").innerHTML =
+      `<div class="providers">${html || "<p>No US availability is listed for this title.</p>"}${link ? `<a class="text-btn" href="${escapeHTML(link)}" target="_blank" rel="noopener noreferrer">See watch options ↗</a>` : ""}<p class="small muted">Availability may change. Data provided by JustWatch via TMDB.</p></div>`;
+  } catch (error) {
+    if (sequence === state.detailSequence && target.isConnected)
+      target.innerHTML = `<p class="form-error">${escapeHTML(error.message)}</p><button class="text-btn" data-action="providers">Try again</button>`;
+  }
+}
+async function loadCollection(id) {
+  if (
+    recordDirty &&
+    !confirm("Discard your unsaved record changes to explore this collection?")
+  )
+    return;
+  ++state.detailPresentation;
+  const item = state.detailItem,
+    sequence = state.detailSequence;
+  const container = $("detail-content");
+  container.innerHTML =
+    '<h2 id="detail-title">Movie collection</h2><div class="loading"><span class="spinner"></span>Loading collection…</div>';
+  recordDirty = false;
+  try {
+    const data = await client.collection(id, {
+      signal: state.detailController?.signal,
+    });
+    if (sequence !== state.detailSequence) return;
+    const parts = (data.parts || []).sort((a, b) =>
+      (a.release_date || "9999").localeCompare(b.release_date || "9999"),
+    );
+    parts.forEach((part) => itemCache.set(keyOf(part), part));
+    container.innerHTML = `<h2 id="detail-title">${escapeHTML(data.name)}</h2><p class="detail-overview">${escapeHTML(data.overview || "")}</p><div class="collection-list">${parts.map((part) => `<button data-action="details" data-key="${keyOf(part)}">${escapeHTML(titleOf(part))}<span class="year">${escapeHTML(yearOf(part) || "TBA")}</span></button>`).join("")}</div><p style="margin-top:20px"><button class="text-btn" data-action="back-detail">← Back to ${escapeHTML(titleOf(item))}</button></p>`;
+  } catch (error) {
+    if (sequence === state.detailSequence) {
+      renderDetail(item, error.message);
+    }
+  }
+}
+async function loadRecommendations() {
+  state.recommendationController?.abort();
+  state.recommendationsReady = false;
+  const controller = new AbortController();
+  state.recommendationController = controller;
+  const seeds = [...library.watched]
+    .filter((x) => !x.rating || x.rating >= 7)
+    .sort(
+      (a, b) =>
+        (b.rating || 0) - (a.rating || 0) ||
+        String(b.watchedDate || "").localeCompare(a.watchedDate || ""),
+    )
+    .slice(0, 5);
+  if (!seeds.length) {
+    state.recommendations = [];
+    $("recommendations-message").innerHTML = empty(
+      "Start with something you love.",
+      "Log a few titles and rate the ones you enjoyed to get personal suggestions.",
+      '<button class="btn primary" data-action="go-discover">Find a title ↗</button>',
+    );
+    $("recommendations-grid").innerHTML = "";
+    return;
+  }
+  $("recommendations-message").innerHTML =
+    '<div class="loading"><span class="spinner"></span>Following your taste…</div>';
+  $("recommendations-grid").innerHTML = "";
+  const responses = await Promise.allSettled(
+    seeds.map(async (seed) => ({
+      seed,
+      data: await client.recommendations(seed.id, typeOf(seed), {
+        signal: controller.signal,
+      }),
+    })),
+  );
+  if (controller.signal.aborted) return;
+  const candidates = new Map();
+  const errors = [];
+  for (const response of responses) {
+    if (response.status === "rejected") {
+      errors.push(
+        response.reason?.message || "Some suggestions could not be loaded.",
+      );
+      continue;
+    }
+    const { seed, data } = response.value;
+    if (data.warning) errors.push(data.warning);
+    data.results.forEach((item, index) => {
+      const key = keyOf(item);
+      if (!candidates.has(key))
+        candidates.set(key, {
+          ...item,
+          _recommendationReason: titleOf(seed),
+          _recommendationRank: index,
+        });
+    });
+  }
+  state.recommendations = [...candidates.values()]
+    .filter(
+      (x) =>
+        !x.adult &&
+        (!yearOf(x) || (x.release_date || x.first_air_date || "") <= today()),
+    )
+    .sort((a, b) => a._recommendationRank - b._recommendationRank)
+    .slice(0, 100);
+  $("recommendations-message").innerHTML = errors.length
+    ? `<div class="notice warning">${escapeHTML(errors[0])} <button class="text-btn" data-action="retry-recommendations">Try again</button></div>`
+    : '<p class="small muted">Based on ' +
+      seeds.map((s) => escapeHTML(titleOf(s))).join(", ") +
+      ". Titles already in your collection are excluded.</p>";
+  state.recommendationsReady = true;
+  renderRecommendationCards();
+}
+function renderRecommendationCards() {
+  const excluded = new Set(
+    [...library.watchlist, ...library.watched].map(keyOf).concat(hiddenKeys()),
+  );
+  const items = state.recommendations
+    .filter((x) => !excluded.has(keyOf(x)))
+    .slice(0, 50);
+  renderCards($("recommendations-grid"), items);
+  if (!items.length && state.recommendationsReady)
+    $("recommendations-grid").innerHTML = empty(
+      "You’re all caught up.",
+      "Log more titles or refresh suggestions to find something different.",
+    );
+}
+function renderStats() {
+  const watched = library.watched,
+    rated = watched.filter((x) => Number(x.rating) > 0),
+    films = watched.filter((x) => typeOf(x) === "movie");
+  const timed = films.filter((x) => Number(x.runtime) > 0),
+    minutes = timed.reduce((sum, x) => sum + Number(x.runtime), 0);
+  const genres = new Map();
+  watched.forEach((item) =>
+    (item.genres || []).forEach((g) =>
+      genres.set(g.name, (genres.get(g.name) || 0) + 1),
+    ),
+  );
+  const sortedGenres = [...genres].sort((a, b) => b[1] - a[1]).slice(0, 8);
+  const top = [...rated].sort((a, b) => b.rating - a.rating).slice(0, 8);
+  top.forEach((item) => itemCache.set(keyOf(item), item));
+  $("stats-content").innerHTML =
+    `<div class="stats-grid"><div class="stat"><strong>${number(library.watchlist.length)}</strong><span>On your watchlist</span></div><div class="stat"><strong>${number(watched.length)}</strong><span>${films.length} films · ${watched.length - films.length} TV shows watched</span></div><div class="stat"><strong>${rated.length ? (rated.reduce((sum, x) => sum + Number(x.rating), 0) / rated.length).toFixed(1) : "—"}</strong><span>Your average rating · ${rated.length} rated</span></div><div class="stat"><strong>${(minutes / 60).toFixed(1)}<small class="small"> h</small></strong><span>Film time · ${timed.length} known runtimes</span></div></div><p class="small muted" style="margin-top:16px">Film time excludes TV series and films without a known runtime. It counts each logged film once.</p><div class="stats-detail"><div class="stats-panel"><h3>Your favorites</h3>${top.length ? top.map((item) => `<div class="stat-line"><button class="title-button" data-action="details" data-key="${keyOf(item)}">${escapeHTML(titleOf(item))}</button><span>${Number(item.rating)} / 10</span></div>`).join("") : '<p class="small muted">Your highest-rated watches will appear here.</p>'}</div><div class="stats-panel"><h3>Your favorite genres</h3>${sortedGenres.length ? sortedGenres.map(([name, count]) => `<div class="stat-line"><span>${escapeHTML(name)}</span><span>${count} ${count === 1 ? "title" : "titles"}</span></div><div class="genre-bar"><span style="width:${(count / sortedGenres[0][1]) * 100}%"></span></div>`).join("") : '<p class="small muted">Log titles to discover your most-watched genres.</p>'}</div></div>`;
+}
+function updateHiddenCount() {
+  $("hidden-count").textContent =
+    `${hiddenKeys().length} ${hiddenKeys().length === 1 ? "title is" : "titles are"} hidden from discovery and suggestions.`;
+  $("restore-hidden").disabled = !hiddenKeys().length;
+}
+function openData() {
+  updateHiddenCount();
+  $("import-message").textContent = "";
+  $("data-dialog").showModal();
+}
+function exportData() {
+  try {
+    const data = store.exportData();
+    const blob = new Blob(
+      [typeof data === "string" ? data : JSON.stringify(data, null, 2)],
+      { type: "application/json" },
+    );
+    const url = URL.createObjectURL(blob),
+      link = document.createElement("a");
+    link.href = url;
+    link.download = `movie-tracker-backup-${today()}.json`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast("Backup exported. Keep it somewhere safe.");
+  } catch (error) {
+    toast(error.message);
+  }
+}
+async function importData(file) {
+  if (!file) return;
+  if (file.size > 20 * 1024 * 1024) {
+    $("import-message").textContent =
+      "This backup is too large. Choose a JSON backup under 20 MB.";
+    return;
+  }
+  try {
+    const text = await file.text();
+    store.importData(text);
+    $("import-message").textContent =
+      `Import complete. Your collection now has ${library.watchlist.length} watchlist titles and ${library.watched.length} watched titles.`;
+    toast("Backup merged with your collection.", true);
+  } catch (error) {
+    $("import-message").textContent = error.message;
+  } finally {
+    $("import-file").value = "";
+  }
+}
+function setTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  $("theme-toggle").setAttribute(
+    "aria-label",
+    `Switch to ${theme === "dark" ? "light" : "dark"} theme`,
+  );
+  document.querySelector('meta[name="theme-color"]').content =
+    theme === "dark" ? "#101715" : "#f6f7f1";
+}
+
+$("discover-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  runDiscovery({ parse: true });
+});
+[
+  "genre-filter",
+  "year-from",
+  "year-to",
+  "sort-filter",
+  "min-votes",
+  "result-limit",
+].forEach((id) =>
+  $(id).addEventListener("change", () => {
+    if ($("discover-form").reportValidity()) runDiscovery();
+  }),
+);
+$("media-type-filter").addEventListener("change", () => {
+  populateGenres($("media-type-filter").value);
+  runDiscovery();
+});
+$("reset-filters").addEventListener("click", resetDiscovery);
+$("search-input").addEventListener("search", () => {
+  if (!$("search-input").value) runDiscovery({ parse: true });
+});
+function resetDiscovery() {
+  state.filters = { ...defaults };
+  $("search-input").value = "";
+  syncFilters(state.filters);
+  runDiscovery();
+}
+function runPreset(preset) {
+  const f = { ...defaults };
+  let text = "";
+  if (preset === "animation") {
+    Object.assign(f, {
+      genreId: "16",
+      yearFrom: "2000",
+      yearTo: String(new Date().getFullYear()),
+      sort: "rating",
+    });
+    text = "top 50 animated movies since 2000";
+  }
+  if (preset === "scifi") {
+    Object.assign(f, {
+      genreId: "878",
+      yearFrom: "2010",
+      yearTo: "2019",
+      sort: "rating",
+    });
+    text = "best 50 sci-fi movies between 2010 and 2019";
+  }
+  state.filters = f;
+  syncFilters(f);
+  $("search-input").value = text;
+  runDiscovery();
+}
+[
+  "library-search",
+  "library-type",
+  "library-genre",
+  "library-sort",
+  "library-rating",
+].forEach((id) =>
+  $(id).addEventListener(
+    id === "library-search" ? "input" : "change",
+    renderLibrary,
+  ),
+);
+$("data-button").addEventListener("click", openData);
+$("footer-data").addEventListener("click", openData);
+$("export-data").addEventListener("click", exportData);
+$("import-data").addEventListener("click", () => $("import-file").click());
+$("import-file").addEventListener("change", (event) =>
+  importData(event.target.files[0]),
+);
+$("restore-hidden").addEventListener("click", () => {
+  if (
+    safeMutation(() => store.restoreHidden(), "Hidden titles restored.") &&
+    state.view === "discover"
+  )
+    runDiscovery();
+});
+$("undo-button").addEventListener("click", () => {
+  try {
+    store.undo();
+    toast("Last change undone.");
+  } catch (error) {
+    toast(error.message);
+  }
+});
+$("dismiss-toast").addEventListener("click", () => {
+  $("toast").hidden = true;
+});
+$("theme-toggle").addEventListener("click", () => {
+  const theme =
+    document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  setTheme(theme);
+  try {
+    storage.setItem("theme", theme);
+  } catch {
+    toast("Theme changed for this visit. Browser storage is unavailable.");
+  }
+});
+$("refresh-recommendations").addEventListener("click", loadRecommendations);
+for (const dialog of [$("movie-dialog"), $("data-dialog")]) {
+  dialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeDialog(dialog);
+  });
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) {
+      const r = dialog.getBoundingClientRect();
+      if (
+        event.clientX < r.left ||
+        event.clientX > r.right ||
+        event.clientY < r.top ||
+        event.clientY > r.bottom
+      )
+        closeDialog(dialog);
+    }
+  });
+}
+window.addEventListener("beforeunload", (event) => {
+  if (recordDirty) {
+    event.preventDefault();
+    event.returnValue = "";
+  }
+});
+window.addEventListener("hashchange", () => {
+  if (location.hash !== "#main") navigate(location.hash.slice(1) || "discover");
+});
+window.addEventListener("storage", (event) => {
+  if (
+    event.key === null ||
+    ["movieTrackerData", "hiddenItems"].includes(event.key)
+  ) {
+    try {
+      const loaded = store.load();
+      reportStorageWarning(loaded.warning || "");
+      updateLibrary();
+      if (recordDirty && $("record-message"))
+        $("record-message").textContent =
+          "Your collection changed in another tab. Saving will apply your current edits.";
+      toast("Collection updated from another tab.");
+    } catch (error) {
+      reportStorageWarning(error.message);
+    }
+  }
+});
+document.addEventListener("click", async (event) => {
+  const button = event.target.closest("button");
+  if (!button) return;
+  if (button.dataset.view) {
+    navigate(button.dataset.view, { focus: true });
+    return;
+  }
+  if (button.dataset.preset) {
+    runPreset(button.dataset.preset);
+    return;
+  }
+  const action = button.dataset.action;
+  if (!action) return;
+  const item = button.dataset.key
+    ? getSaved(itemCache.get(button.dataset.key) || {}) ||
+      itemCache.get(button.dataset.key)
+    : state.detailItem;
+  switch (action) {
+    case "details":
+      if (recordDirty && !confirm("Discard your unsaved record changes?"))
+        return;
+      recordDirty = false;
+      openDetails(item);
+      break;
+    case "save-watchlist":
+      saveCard(item, "watchlist");
+      break;
+    case "save-watched":
+      saveCard(item, "watched");
+      break;
+    case "retry-discovery":
+      runDiscovery();
+      break;
+    case "reset-discovery":
+      resetDiscovery();
+      break;
+    case "go-discover":
+      navigate("discover", { focus: true });
+      break;
+    case "close-dialog":
+      closeDialog(button.closest("dialog"));
+      break;
+    case "providers":
+      loadProviders();
+      break;
+    case "collection":
+      loadCollection(Number(button.dataset.id));
+      break;
+    case "back-detail":
+      renderDetail(state.detailItem);
+      break;
+    case "remove-record":
+      if (
+        recordDirty &&
+        !confirm("Discard your unsaved record changes and remove this title?")
+      )
+        return;
+      if (
+        safeMutation(
+          () => store.removeItem(item.id, typeOf(item)),
+          "Title removed from your collection.",
+        )
+      ) {
+        recordDirty = false;
+        closeDialog($("movie-dialog"));
+      }
+      break;
+    case "hide-title":
+      if (recordDirty && !confirm("Discard your unsaved record changes?"))
+        return;
+      if (
+        safeMutation(
+          () => store.setHidden(item.id, typeOf(item), true),
+          "Title hidden from discovery.",
+        )
+      ) {
+        recordDirty = false;
+        closeDialog($("movie-dialog"));
+        if (state.view === "discover") runDiscovery();
+      }
+      break;
+    case "retry-recommendations":
+      loadRecommendations();
+      break;
+    case "reset-library":
+      ["library-search", "library-genre", "library-rating"].forEach(
+        (id) => ($(id).value = ""),
+      );
+      $("library-type").value = "all";
+      renderLibrary();
+      break;
+  }
 });
 
-function hasTMDBApiKey() {
-    return typeof TMDB_API_KEY === 'string' && TMDB_API_KEY.trim().length > 0;
-}
-
-function renderTMDBSetupMessage(message) {
-    return `
-        <div class="empty-state">
-            <div class="empty-state-icon">🔑</div>
-            <div class="empty-state-text">
-                ${message}<br><br>
-                Add your TMDB API key to the <code>TMDB_API_KEY</code> constant in <code>app.js</code>, then reload the page.
-            </div>
-        </div>
-    `;
-}
-
-function cloneBrowseState(state = currentBrowseState) {
-    return {
-        mode: state.mode || 'browse',
-        results: Array.isArray(state.results) ? [...state.results] : [],
-        mediaType: state.mediaType || 'movie',
-        query: state.query || '',
-        year: state.year || null,
-        yearMode: state.yearMode || 'best',
-        genreId: state.genreId || '',
-        activeFilter: state.activeFilter || 'popular',
-        collections: Array.isArray(state.collections) ? [...state.collections] : [],
-        franchiseResults: Array.isArray(state.franchiseResults) ? [...state.franchiseResults] : [],
-        collectionId: state.collectionId || null,
-        previousState: state.previousState ? cloneBrowseState(state.previousState) : null
-    };
-}
-
-function restoreBrowseState(state = currentBrowseState) {
-    if (!state || !Array.isArray(state.results) || state.results.length === 0) {
-        initializeBrowse();
-        return;
-    }
-
-    currentBrowseState = cloneBrowseState(state);
-
-    if (state.mode === 'search') {
-        renderSearchGrid(
-            state.results,
-            state.query,
-            state.collections || [],
-            state.franchiseResults || []
-        );
-        return;
-    }
-
-    if (state.mode === 'collection') {
-        renderCollectionResults(state);
-        return;
-    }
-
-    renderBrowseGrid(
-        state.results,
-        state.mediaType,
-        state.query,
-        state.year
-    );
-}
-
-function syncBrowseControlsFromState(state = currentBrowseState) {
-    const mediaTypeFilter = document.getElementById('media-type-filter');
-    const genreFilter = document.getElementById('genre-filter');
-    const yearFilter = document.getElementById('year-filter');
-    const yearModeFilter = document.getElementById('year-mode-filter');
-    if (mediaTypeFilter && state.mediaType) {
-        mediaTypeFilter.value = state.mediaType;
-    }
-    if (genreFilter) {
-        genreFilter.value = state.genreId || '';
-    }
-    if (yearFilter) {
-        yearFilter.value = state.year || '';
-        yearFilter.style.display = state.activeFilter === 'by_year' ? 'block' : 'none';
-    }
-    if (yearModeFilter) {
-        yearModeFilter.value = state.yearMode || 'best';
-        yearModeFilter.style.display = state.activeFilter === 'by_year' ? 'block' : 'none';
-    }
-    document.querySelectorAll('.filter-btn').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.filter === (state.activeFilter || 'popular'));
-    });
-}
-
-function getReleaseDateForMedia(item, mediaType = 'movie') {
-    return mediaType === 'tv' ? item.first_air_date : item.release_date;
-}
-
-function calculateTrendingScore(item, windowName, mediaType = 'movie') {
-    const voteCount = item.vote_count || 0;
-    const voteAverage = item.vote_average || 0;
-    const popularity = item.popularity || 0;
-    const releaseDate = getReleaseDateForMedia(item, mediaType);
-
-    let recencyBonus = 0;
-    if (releaseDate) {
-        const daysSinceRelease = Math.round((Date.now() - new Date(releaseDate).getTime()) / (1000 * 60 * 60 * 24));
-        if (!Number.isNaN(daysSinceRelease)) {
-            if (daysSinceRelease <= 14) recencyBonus = 18;
-            else if (daysSinceRelease <= 45) recencyBonus = 12;
-            else if (daysSinceRelease <= 120) recencyBonus = 6;
-        }
-    }
-
-    const windowWeight = windowName === 'day' ? 26 : 16;
-    const qualityScore = voteCount > 0 ? Math.min(voteAverage, 10) * 2.5 : 0;
-    const confidenceScore = Math.min(Math.log10(voteCount + 1) * 8, 26);
-    const popularityScore = Math.min(Math.log10(popularity + 1) * 12, 28);
-
-    return windowWeight + qualityScore + confidenceScore + popularityScore + recencyBonus;
-}
-
-function calculateYearRankingScore(item, mediaType = 'movie', mode = 'best') {
-    const voteAverage = item.vote_average || 0;
-    const voteCount = item.vote_count || 0;
-    const popularity = item.popularity || 0;
-
-    if (mode === 'popular') {
-        return (popularity * 1.2) + Math.min(Math.log10(voteCount + 1) * 18, 40) + voteAverage;
-    }
-
-    const qualityScore = voteAverage * 9;
-    const confidenceScore = Math.min(Math.log10(voteCount + 1) * 18, 44);
-    const popularityScore = Math.min(Math.log10(popularity + 1) * 10, 22);
-    const releaseDate = getReleaseDateForMedia(item, mediaType);
-    const freshnessBonus = releaseDate && releaseDate.startsWith(String(new Date().getFullYear())) ? 2 : 0;
-
-    return qualityScore + confidenceScore + popularityScore + freshnessBonus;
-}
-
-async function fetchTrendingResults(mediaType, { genreId = '', pageLimit = 2 } = {}) {
-    const windowConfigs = [
-        { name: 'day', weight: 'day' },
-        { name: 'week', weight: 'week' }
-    ];
-
-    const requests = [];
-    windowConfigs.forEach(windowConfig => {
-        for (let page = 1; page <= pageLimit; page++) {
-            requests.push(
-                fetch(`${TMDB_BASE_URL}/trending/${mediaType}/${windowConfig.name}?api_key=${TMDB_API_KEY}&page=${page}`)
-                    .then(r => r.json())
-                    .then(data => ({ items: data.results || [], windowName: windowConfig.weight }))
-                    .catch(() => ({ items: [], windowName: windowConfig.weight }))
-            );
-        }
-    });
-
-    const responses = await Promise.all(requests);
-    const rankedMap = new Map();
-
-    responses.forEach(({ items, windowName }) => {
-        items.forEach(item => {
-            if (genreId && (!item.genre_ids || !item.genre_ids.includes(parseInt(genreId, 10)))) {
-                return;
-            }
-
-            const key = `${mediaType}-${item.id}`;
-            const nextScore = calculateTrendingScore(item, windowName, mediaType);
-            const existing = rankedMap.get(key);
-
-            if (!existing || nextScore > existing.trendingScore) {
-                rankedMap.set(key, {
-                    ...item,
-                    mediaType,
-                    trendingWindow: windowName,
-                    trendingScore: nextScore
-                });
-            }
-        });
-    });
-
-    return [...rankedMap.values()].sort((a, b) => {
-        if ((b.trendingScore || 0) !== (a.trendingScore || 0)) {
-            return (b.trendingScore || 0) - (a.trendingScore || 0);
-        }
-        if ((b.popularity || 0) !== (a.popularity || 0)) {
-            return (b.popularity || 0) - (a.popularity || 0);
-        }
-        return (b.vote_count || 0) - (a.vote_count || 0);
-    });
-}
-
-// ============= Event Listeners =============
-
-function initializeEventListeners() {
-    // Navigation
-    document.querySelectorAll('.nav-btn').forEach(btn => {
-        btn.addEventListener('click', () => switchView(btn.dataset.view));
-    });
-
-    // Search
-    document.getElementById('search-btn').addEventListener('click', searchMovies);
-    document.getElementById('search-input').addEventListener('keypress', (e) => {
-        if (e.key === 'Enter') {
-            e.preventDefault();
-            searchMovies();
-        }
-    });
-
-    // Sort and Filters
-    document.getElementById('watchlist-sort').addEventListener('change', renderWatchlist);
-    document.getElementById('watched-sort').addEventListener('change', renderWatched);
-
-    // Watchlist filters and search
-    document.getElementById('watchlist-type-filter').addEventListener('change', renderWatchlist);
-    document.getElementById('watchlist-genre-filter').addEventListener('change', renderWatchlist);
-    document.getElementById('watchlist-search').addEventListener('input', renderWatchlist);
-
-    // Watched filters and search
-    document.getElementById('watched-type-filter').addEventListener('change', renderWatched);
-    document.getElementById('watched-genre-filter').addEventListener('change', renderWatched);
-    document.getElementById('watched-rating-filter').addEventListener('change', renderWatched);
-    document.getElementById('watched-search').addEventListener('input', renderWatched);
-
-    // Recommendations filter
-    document.getElementById('rec-type-filter').addEventListener('change', renderRecommendationsGrid);
-
-    // Browse filters
-    document.querySelectorAll('.filter-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-            document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-
-            // Show/hide year filter
-            const yearFilter = document.getElementById('year-filter');
-            const yearModeFilter = document.getElementById('year-mode-filter');
-            if (btn.dataset.filter === 'by_year') {
-                yearFilter.style.display = 'block';
-                yearModeFilter.style.display = 'block';
-            } else {
-                yearFilter.style.display = 'none';
-                yearModeFilter.style.display = 'none';
-            }
-
-            loadBrowseMovies(btn.dataset.filter);
-        });
-    });
-    document.getElementById('genre-filter').addEventListener('change', () => loadBrowseMovies());
-    document.getElementById('year-filter').addEventListener('change', () => loadBrowseMovies());
-    document.getElementById('year-mode-filter').addEventListener('change', () => loadBrowseMovies('by_year'));
-    document.getElementById('media-type-filter').addEventListener('change', async () => {
-        await updateGenresForMediaType();
-        loadBrowseMovies();
-    });
-
-    // Theme toggle
-    document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
-
-    // Modal
-    document.getElementById('modal-close').addEventListener('click', closeModal);
-    document.getElementById('movie-modal').addEventListener('click', (e) => {
-        if (e.target.id === 'movie-modal') closeModal();
-    });
-}
-
-// ============= View Management =============
-
-function switchView(viewName) {
-    // Update active nav button
-    document.querySelectorAll('.nav-btn').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.view === viewName);
-    });
-
-    // Update active view
-    document.querySelectorAll('.view').forEach(view => {
-        view.classList.toggle('active', view.id === `${viewName}-view`);
-    });
-
-    // Render appropriate content
-    switch(viewName) {
-        case 'browse':
-            if (currentBrowseState.results.length > 0) {
-                syncBrowseControlsFromState();
-                restoreBrowseState();
-            } else {
-                initializeBrowse();
-            }
-            break;
-        case 'watchlist':
-            renderWatchlist();
-            break;
-        case 'watched':
-            renderWatched();
-            break;
-        case 'recommendations':
-            loadRecommendations();
-            break;
-        case 'stats':
-            updateStats();
-            break;
-    }
-}
-
-function refreshCurrentView() {
-    const activeNav = document.querySelector('.nav-btn.active');
-    if (!activeNav) return;
-
-    const currentView = activeNav.dataset.view;
-    switch(currentView) {
-        case 'browse':
-            if (currentBrowseState.results.length > 0) {
-                restoreBrowseState();
-            }
-            break;
-        case 'watchlist':
-            renderWatchlist();
-            break;
-        case 'watched':
-            renderWatched();
-            break;
-        case 'recommendations':
-            renderRecommendationsGrid();
-            break;
-        case 'stats':
-            updateStats();
-            break;
-    }
-}
-
-// ============= TMDB API Integration =============
-
-// Franchise keyword mapping - search these additional terms for better collection results
-const FRANCHISE_KEYWORDS = {
-    'marvel': ['Avengers', 'Iron Man', 'Thor', 'Captain America', 'Spider-Man', 'Guardians of the Galaxy', 'Black Panther', 'Ant-Man', 'Doctor Strange', 'X-Men', 'Deadpool', 'Hulk', 'Black Widow', 'Hawkeye', 'Loki', 'Eternals', 'Shang-Chi'],
-    'mcu': ['Avengers', 'Iron Man', 'Thor', 'Captain America', 'Spider-Man', 'Guardians of the Galaxy', 'Black Panther', 'Ant-Man', 'Doctor Strange', 'Eternals', 'Shang-Chi'],
-    'star wars': ['Star Wars', 'The Mandalorian', 'Obi-Wan Kenobi', 'The Book of Boba Fett', 'Andor', 'Ahsoka', 'The Clone Wars', 'The Bad Batch', 'Rogue One', 'Solo: A Star Wars Story'],
-    'starwars': ['Star Wars', 'The Mandalorian', 'Obi-Wan Kenobi', 'The Book of Boba Fett', 'Andor', 'Ahsoka', 'The Clone Wars', 'The Bad Batch'],
-    'dc': ['Batman', 'Superman', 'Wonder Woman', 'Justice League', 'Aquaman', 'The Flash', 'Suicide Squad', 'Shazam', 'Black Adam', 'Joker', 'Harley Quinn', 'Peacemaker'],
-    'dceu': ['Batman', 'Superman', 'Wonder Woman', 'Justice League', 'Aquaman', 'Shazam', 'Black Adam'],
-    'pixar': ['Toy Story', 'Finding Nemo', 'Finding Dory', 'The Incredibles', 'Cars', 'Monsters, Inc', 'Monsters University', 'Up', 'Wall-E', 'Coco', 'Inside Out', 'Soul', 'Luca', 'Turning Red', 'Elemental', 'Ratatouille', 'Brave'],
-    'disney': ['Frozen', 'Moana', 'Tangled', 'Encanto', 'Zootopia', 'Big Hero 6', 'Wreck-It Ralph', 'Lion King', 'Aladdin', 'Little Mermaid', 'Beauty and the Beast'],
-    'harry potter': ['Harry Potter', 'Fantastic Beasts', 'Hogwarts'],
-    'wizarding world': ['Harry Potter', 'Fantastic Beasts'],
-    'lord of the rings': ['Lord of the Rings', 'The Hobbit', 'Rings of Power'],
-    'lotr': ['Lord of the Rings', 'The Hobbit', 'Rings of Power'],
-    'tolkien': ['Lord of the Rings', 'The Hobbit', 'Rings of Power'],
-    'fast and furious': ['Fast & Furious', 'Fast and Furious', 'Furious'],
-    'fast & furious': ['Fast & Furious', 'Fast and Furious', 'Furious'],
-    'jurassic': ['Jurassic Park', 'Jurassic World'],
-    'jurassic park': ['Jurassic Park', 'Jurassic World'],
-    'transformers': ['Transformers', 'Bumblebee'],
-    'mission impossible': ['Mission: Impossible', 'Mission Impossible'],
-    'james bond': ['James Bond', '007'],
-    'bond': ['James Bond', '007'],
-    '007': ['James Bond', '007'],
-    'john wick': ['John Wick'],
-    'matrix': ['The Matrix', 'Matrix'],
-    'indiana jones': ['Indiana Jones'],
-    'pirates': ['Pirates of the Caribbean'],
-    'pirates of the caribbean': ['Pirates of the Caribbean'],
-    'shrek': ['Shrek', 'Puss in Boots'],
-    'dreamworks': ['Shrek', 'How to Train Your Dragon', 'Kung Fu Panda', 'Madagascar', 'Trolls', 'Boss Baby'],
-    'despicable me': ['Despicable Me', 'Minions'],
-    'minions': ['Despicable Me', 'Minions'],
-    'kung fu panda': ['Kung Fu Panda'],
-    'how to train your dragon': ['How to Train Your Dragon'],
-    'planet of the apes': ['Planet of the Apes', 'Apes'],
-    'alien': ['Alien', 'Aliens', 'Prometheus', 'Covenant'],
-    'predator': ['Predator', 'Prey'],
-    'terminator': ['Terminator'],
-    'rocky': ['Rocky', 'Creed'],
-    'creed': ['Rocky', 'Creed'],
-    'godzilla': ['Godzilla', 'Kong', 'Monsterverse'],
-    'monsterverse': ['Godzilla', 'Kong'],
-    'conjuring': ['Conjuring', 'Annabelle', 'Nun'],
-    'horror': ['Conjuring', 'Insidious', 'Paranormal Activity', 'Scream', 'Halloween'],
-    'scream': ['Scream'],
-    'halloween': ['Halloween', 'Michael Myers'],
-    'nightmare': ['Nightmare on Elm Street', 'Freddy'],
-    'friday the 13th': ['Friday the 13th', 'Jason'],
-    'saw': ['Saw', 'Jigsaw'],
-    'purge': ['Purge'],
-    'trek': ['Star Trek'],
-    'star trek': ['Star Trek'],
-    'avatar': ['Avatar'],
-    'hunger games': ['Hunger Games', 'Mockingjay', 'Catching Fire'],
-    'twilight': ['Twilight', 'Breaking Dawn', 'New Moon', 'Eclipse'],
-    'maze runner': ['Maze Runner'],
-    'divergent': ['Divergent', 'Insurgent', 'Allegiant']
-};
-
-const AMBIGUOUS_FRANCHISE_TERMS = new Set([
-    'solo',
-    'avatar',
-    'alien',
-    'bond',
-    'pirates',
-    'rocky',
-    'creed',
-    'matrix',
-    'predator',
-    'halloween',
-    'saw',
-    'purge',
-    'scream',
-    'dc',
-    'mcu'
-]);
-
-const FRANCHISE_RULES = {
-    'star wars': {
-        aliases: [
-            'star wars',
-            'rogue one',
-            'solo a star wars story',
-            'the mandalorian',
-            'obi wan kenobi',
-            'the book of boba fett',
-            'andor',
-            'ahsoka',
-            'the clone wars',
-            'the bad batch',
-            'rebels',
-            'visions',
-            'skeleton crew',
-            'the acolyte',
-            'resistance',
-            'droids',
-            'young jedi adventures',
-            'tales of the jedi',
-            'tales of the empire',
-            'tales of the underworld',
-            'forces of destiny',
-            'detours',
-            'ewoks',
-            'the ewok adventures'
-        ],
-        standaloneAliases: [
-            'the mandalorian',
-            'andor',
-            'ahsoka',
-            'obi wan kenobi',
-            'the book of boba fett',
-            'the acolyte'
-        ],
-        standaloneAliasMediaTypes: {
-            'the mandalorian': ['tv'],
-            'andor': ['tv'],
-            'ahsoka': ['tv'],
-            'obi wan kenobi': ['tv'],
-            'the book of boba fett': ['tv'],
-            'the acolyte': ['tv']
-        },
-        narrativeTitlePatterns: [
-            /^star wars$/,
-            /^star wars episode /,
-            /^star wars the /,
-            /^the empire strikes back$/,
-            /^return of the jedi$/,
-            /^star wars rebels$/,
-            /^star wars resistance$/,
-            /^star wars droids$/,
-            /^star wars visions$/,
-            /^star wars clone wars$/,
-            /^star wars maul shadow lord$/,
-            /^star wars ewoks$/,
-            /^ewoks$/,
-            /^ewoks the battle for endor$/,
-            /^caravan of courage /,
-            /^rogue one /,
-            /^solo a star wars story$/,
-            /^the mandalorian$/,
-            /^andor$/,
-            /^ahsoka$/,
-            /^obi wan kenobi$/,
-            /^the book of boba fett$/,
-            /^the acolyte$/,
-            /^lego star wars /
-        ],
-        supplementalTitlePatterns: [
-            / holiday special$/,
-            / summer vacation$/,
-            / terrifying tales$/,
-            / galaxy of adventures$/,
-            / galaxy of sounds$/,
-            / fun with nubs$/,
-            / go rogue$/,
-            / biomes$/,
-            / detours$/,
-            / dreams$/,
-            / tech$/,
-            / squadrons hunted$/,
-            / media offline$/,
-            / group effect$/,
-            /^star wars droids /,
-            /^lego star wars revenge of the brick$/,
-            /^lego star wars the quest for r2 d2$/,
-            /^lego star wars bombad bounty$/,
-            /^lego star wars the padawan menace$/,
-            /^lego star wars the empire strikes out$/
-        ],
-        excludedTitlePatterns: [
-            /^phineas and ferb /,
-            /^robot chicken /,
-            /^family guy /,
-            /^disney gallery /,
-            /^icons unearthed /,
-            /^saving /,
-            /^battle /,
-            /^wccw /,
-            /^pwusa /,
-            /^the making of /,
-            / spoof/,
-            / greatest moments/,
-            / heroes and villains/,
-            / characters of /
-        ],
-        minSignalCategories: 2,
-        minimumScore: 75
-    }
-};
-
-function normalizeSearchText(text) {
-    return (text || '')
-        .toLowerCase()
-        .replace(/&/g, 'and')
-        .replace(/[^a-z0-9]+/g, ' ')
-        .trim();
-}
-
-function tokenizeSearchText(text) {
-    const normalized = normalizeSearchText(text);
-    return normalized ? normalized.split(' ').filter(Boolean) : [];
-}
-
-function getFranchiseTermsForQuery(query) {
-    const queryNorm = normalizeSearchText(query);
-    const compactQuery = queryNorm.replace(/\s+/g, '');
-    return FRANCHISE_KEYWORDS[queryNorm] || FRANCHISE_KEYWORDS[compactQuery] || [];
-}
-
-function escapeRegExp(text) {
-    return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function scoreCollectionMatch(collectionName, query, franchiseTerms = []) {
-    const nameNorm = normalizeSearchText(collectionName);
-    if (!nameNorm) return { score: 0, overlapRatio: 0, nameNorm };
-
-    const queryNorm = normalizeSearchText(query);
-    const queryTokens = tokenizeSearchText(query);
-    const termList = [query, ...franchiseTerms]
-        .map(term => normalizeSearchText(term))
-        .filter(Boolean);
-
-    const nameTokens = tokenizeSearchText(nameNorm);
-    const sharedTokens = queryTokens.filter(token => nameTokens.includes(token));
-    const overlapRatio = queryTokens.length > 0 ? sharedTokens.length / queryTokens.length : 0;
-
-    let score = 0;
-
-    if (termList.includes(nameNorm)) score += 100;
-    if (termList.some(term => nameNorm.startsWith(term))) score += 70;
-    if (termList.some(term => nameNorm.includes(term))) score += 40;
-
-    if (overlapRatio > 0) score += Math.round(overlapRatio * 40);
-
-    // Strong boost for exact word match on short queries
-    if (queryNorm && queryNorm.length <= 5) {
-        const wordMatch = new RegExp(`\\b${escapeRegExp(queryNorm)}\\b`).test(nameNorm);
-        if (wordMatch) score += 20;
-    }
-
-    return { score, overlapRatio, nameNorm };
-}
-
-function filterAndRankCollections(collections, query, franchiseTerms = []) {
-    const queryNorm = normalizeSearchText(query);
-    const queryTokens = tokenizeSearchText(query);
-    const definition = getFranchiseDefinition(query, franchiseTerms);
-    const termList = [query, ...franchiseTerms]
-        .map(term => normalizeSearchText(term))
-        .filter(Boolean);
-
-    if (!queryNorm || collections.length === 0) return [];
-
-    const scored = collections.map(collection => {
-        const { score, overlapRatio, nameNorm } = scoreCollectionMatch(collection.name, query, franchiseTerms);
-        return { collection, score, overlapRatio, nameNorm };
-    });
-
-    const filtered = scored.filter(item => {
-        if (definition.hasRule && definition.excludedTitlePatterns.some(pattern => pattern.test(item.nameNorm))) {
-            return false;
-        }
-
-        const hasBasicMatch = termList.some(term => item.nameNorm.includes(term));
-        const hasOverlap = item.overlapRatio >= 0.5 && queryTokens.length >= 2;
-        const hasStrongScore = item.score >= 60;
-        const shortQuery = queryTokens.length === 1 && queryNorm.length <= 3;
-
-        if (shortQuery) {
-            const hasLongTermMatch = termList.some(term => term.length >= 4 && item.nameNorm.includes(term));
-            return (item.score >= 70 && hasBasicMatch) || (franchiseTerms.length > 0 && hasLongTermMatch);
-        }
-
-        return hasStrongScore || hasOverlap || hasBasicMatch;
-    });
-
-    return filtered
-        .sort((a, b) => b.score - a.score)
-        .map(item => item.collection);
-}
-
-async function fetchKeywordIds(terms = []) {
-    if (!hasTMDBApiKey()) return [];
-    const uniqueTerms = [...new Set(terms.map(term => term.trim()).filter(Boolean))];
-    if (uniqueTerms.length === 0) return [];
-
-    const keywordPromises = uniqueTerms.map(term =>
-        fetch(`${TMDB_BASE_URL}/search/keyword?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(term)}`)
-            .then(r => r.json())
-            .catch(() => null)
-    );
-
-    const keywordResults = await Promise.all(keywordPromises);
-    const keywordIds = [];
-    keywordResults.forEach(result => {
-        const keyword = result?.results?.[0];
-        if (keyword && !keywordIds.includes(keyword.id)) {
-            keywordIds.push(keyword.id);
-        }
-    });
-
-    return keywordIds;
-}
-
-async function fetchDiscoverByKeywords(keywordIds = [], mediaType = 'movie') {
-    if (!hasTMDBApiKey()) return [];
-    if (keywordIds.length === 0) return [];
-
-    const keywordParam = keywordIds.slice(0, 3).join(',');
-    const results = [];
-
-    try {
-        for (let page = 1; page <= 2; page++) {
-            const discoverUrl = `${TMDB_BASE_URL}/discover/${mediaType}?api_key=${TMDB_API_KEY}&with_keywords=${keywordParam}&sort_by=popularity.desc&page=${page}`;
-            const response = await fetch(discoverUrl);
-            const data = await response.json();
-            results.push(...(data.results || []));
-        }
-        return results;
-    } catch (error) {
-        console.error('Error fetching discover by keywords:', error);
-        return [];
-    }
-}
-
-async function fetchCollectionParts(collectionId) {
-    if (!hasTMDBApiKey()) return [];
-    if (!collectionId) return [];
-
-    try {
-        const response = await fetch(`${TMDB_BASE_URL}/collection/${collectionId}?api_key=${TMDB_API_KEY}`);
-        const data = await response.json();
-        return data?.parts || [];
-    } catch (error) {
-        console.error('Error fetching collection parts:', error);
-        return [];
-    }
-}
-
-async function fetchMediaSignalDetails(mediaId, mediaType = 'movie') {
-    if (!hasTMDBApiKey()) return null;
-    if (!mediaId) return null;
-
-    try {
-        const response = await fetch(
-            `${TMDB_BASE_URL}/${mediaType}/${mediaId}?api_key=${TMDB_API_KEY}&append_to_response=keywords,recommendations,similar`
-        );
-        return await response.json();
-    } catch (error) {
-        console.error('Error fetching media signal details:', error);
-        return null;
-    }
-}
-
-function getMediaTitle(item) {
-    return item?.title || item?.name || '';
-}
-
-function getMediaType(item, fallback = 'movie') {
-    return item?.media_type || item?.mediaType || fallback;
-}
-
-function getKeywordIdsFromDetails(details, mediaType = 'movie') {
-    if (!details) return [];
-
-    // TMDB response shape differs for movie vs tv.
-    if (mediaType === 'movie') {
-        return (details.keywords?.keywords || []).map(k => k.id).filter(Boolean);
-    }
-    return (details.keywords?.results || []).map(k => k.id).filter(Boolean);
-}
-
-function matchesFranchiseTerms(item, terms = []) {
-    const titleNorm = normalizeSearchText(getMediaTitle(item));
-    if (!titleNorm) return false;
-
-    const normalizedTerms = terms
-        .map(term => normalizeSearchText(term))
-        .filter(Boolean);
-
-    if (normalizedTerms.some(term => titleNorm.includes(term))) return true;
-
-    const titleTokens = tokenizeSearchText(titleNorm);
-    return normalizedTerms.some(term => {
-        const termTokens = tokenizeSearchText(term);
-        if (termTokens.length < 2) return false;
-        const matches = termTokens.filter(token => titleTokens.includes(token)).length;
-        return matches >= Math.ceil(termTokens.length * 0.6);
-    });
-}
-
-function getDistinctiveFranchiseTerms(query, franchiseTerms = []) {
-    return [...new Set([query, ...franchiseTerms]
-        .map(term => normalizeSearchText(term))
-        .filter(Boolean)
-        .filter(term => {
-            const tokens = tokenizeSearchText(term);
-            if (tokens.length >= 2) return true;
-            if (term.length < 5) return false;
-            return !AMBIGUOUS_FRANCHISE_TERMS.has(term);
-        }))];
-}
-
-function getFranchiseDefinition(query, franchiseTerms = []) {
-    const normalizedQuery = normalizeSearchText(query);
-    const compactQuery = normalizedQuery.replace(/\s+/g, '');
-    const ruleKey = FRANCHISE_RULES[normalizedQuery]
-        ? normalizedQuery
-        : Object.keys(FRANCHISE_RULES).find(key => key.replace(/\s+/g, '') === compactQuery);
-    const rule = ruleKey ? FRANCHISE_RULES[ruleKey] : null;
-    const aliases = rule?.aliases?.length
-        ? [...new Set(rule.aliases.map(alias => normalizeSearchText(alias)).filter(Boolean))]
-        : getDistinctiveFranchiseTerms('', franchiseTerms);
-
-    return {
-        query: ruleKey || normalizedQuery,
-        aliases,
-        standaloneAliases: rule?.standaloneAliases?.length
-            ? [...new Set(rule.standaloneAliases.map(alias => normalizeSearchText(alias)).filter(Boolean))]
-            : [],
-        standaloneAliasMediaTypes: Object.entries(rule?.standaloneAliasMediaTypes || {}).reduce((aliases, [alias, mediaTypes]) => {
-            aliases[normalizeSearchText(alias)] = mediaTypes;
-            return aliases;
-        }, {}),
-        narrativeTitlePatterns: rule?.narrativeTitlePatterns || [],
-        supplementalTitlePatterns: rule?.supplementalTitlePatterns || [],
-        excludedTitlePatterns: rule?.excludedTitlePatterns || [],
-        minSignalCategories: rule?.minSignalCategories || 2,
-        minimumScore: rule?.minimumScore || 80,
-        hasRule: Boolean(rule)
-    };
-}
-
-function isExcludedFromFranchise(item, definition) {
-    const titleNorm = normalizeSearchText(getMediaTitle(item));
-    return definition.excludedTitlePatterns.some(pattern => pattern.test(titleNorm));
-}
-
-function getFranchiseTitleMatchStrength(item, definition) {
-    const titleNorm = normalizeSearchText(getMediaTitle(item));
-    if (!titleNorm || isExcludedFromFranchise(item, definition)) return null;
-
-    const mediaType = getMediaType(item);
-    const titleAliases = [definition.query, ...definition.aliases]
-        .filter(Boolean)
-        .sort((a, b) => b.length - a.length);
-
-    for (const alias of titleAliases) {
-        const aliasTokens = tokenizeSearchText(alias);
-        const isStandaloneAlias = definition.standaloneAliases.includes(alias);
-        const standaloneMediaTypes = definition.standaloneAliasMediaTypes[alias] || [];
-
-        if (titleNorm === alias) {
-            if (isStandaloneAlias) {
-                return standaloneMediaTypes.length === 0 || standaloneMediaTypes.includes(mediaType) ? 'exact' : null;
-            }
-
-            if (alias === definition.query || titleNorm.includes(definition.query)) return 'exact';
-            return null;
-        }
-        if (isStandaloneAlias) continue;
-        if (definition.hasRule && !alias.includes(definition.query) && !titleNorm.includes(definition.query)) {
-            continue;
-        }
-
-        if (aliasTokens.length >= 2 && titleNorm.startsWith(`${alias} `)) return 'prefix';
-
-        if (aliasTokens.length >= 2 && titleNorm.includes(alias)) {
-            return 'contains';
-        }
-    }
-
-    return null;
-}
-
-function matchesDistinctiveFranchiseTerms(item, query, franchiseTerms = []) {
-    const titleNorm = normalizeSearchText(getMediaTitle(item));
-    if (!titleNorm) return false;
-
-    const definition = getFranchiseDefinition(query, franchiseTerms);
-    if (isExcludedFromFranchise(item, definition)) return false;
-
-    const titleTokens = tokenizeSearchText(titleNorm);
-    const queryTerm = definition.query;
-    const distinctiveFranchiseTerms = definition.aliases;
-
-    const queryMatches = (() => {
-        if (!queryTerm) return false;
-        const queryTokens = tokenizeSearchText(queryTerm);
-        if (queryTokens.length === 0) return false;
-
-        if (queryTokens.length >= 2) {
-            return titleNorm.startsWith(queryTerm);
-        }
-
-        return titleTokens.includes(queryTerm);
-    })();
-
-    const synonymMatches = distinctiveFranchiseTerms.some(term => {
-        const termTokens = tokenizeSearchText(term);
-        if (titleNorm.includes(term)) return true;
-
-        if (termTokens.length === 1) {
-            return titleTokens.includes(term);
-        }
-
-        const overlap = termTokens.filter(token => titleTokens.includes(token)).length;
-        return overlap >= Math.ceil(termTokens.length * 0.75);
-    });
-
-    if (definition.hasRule) {
-        return queryMatches || Boolean(getFranchiseTitleMatchStrength(item, definition));
-    }
-
-    return queryMatches || synonymMatches;
-}
-
-function addSignalCandidate(candidateMap, item, mediaType, score, reason, category = 'other') {
-    if (!item || !item.id || item.media_type === 'person') return;
-    const key = `${mediaType}-${item.id}`;
-    if (!candidateMap.has(key)) {
-        candidateMap.set(key, {
-            item: { ...item, media_type: mediaType },
-            score: 0,
-            reasons: new Set(),
-            categories: new Set()
-        });
-    }
-
-    const current = candidateMap.get(key);
-    current.score += score;
-    current.reasons.add(reason);
-    current.categories.add(category);
-    candidateMap.set(key, current);
-}
-
-function getFranchiseContentTier(item, definition) {
-    const titleNorm = normalizeSearchText(getMediaTitle(item));
-    if (!titleNorm || isExcludedFromFranchise(item, definition)) return 'excluded';
-
-    if (definition.supplementalTitlePatterns.some(pattern => pattern.test(titleNorm))) {
-        return 'supplemental';
-    }
-
-    if (definition.narrativeTitlePatterns.some(pattern => pattern.test(titleNorm))) {
-        return 'primary';
-    }
-
-    if (getFranchiseTitleMatchStrength(item, definition)) {
-        return 'primary';
-    }
-
-    return 'supplemental';
-}
-
-function isTrustedFranchiseCollection(collection, definition) {
-    const nameNorm = normalizeSearchText(collection?.name);
-    if (!nameNorm || !definition.hasRule) return false;
-
-    if (nameNorm === `${definition.query} collection`) return true;
-
-    return definition.aliases.some(alias => {
-        if (alias.length < 6) return false;
-        return nameNorm === `${alias} collection` || nameNorm.startsWith(`${alias} `);
-    });
-}
-
-function confidenceFromScore(score) {
-    if (score >= 95) return 'high';
-    if (score >= 60) return 'medium';
-    return 'low';
-}
-
-async function buildSmartFranchiseResults({
-    query,
-    mediaTypeFilter,
-    directResults = [],
-    franchiseSearchResults = [],
-    collections = [],
-    franchiseTerms = []
-}) {
-    const terms = [...new Set([query, ...franchiseTerms].map(t => t.trim()).filter(Boolean))];
-    const definition = getFranchiseDefinition(query, franchiseTerms);
-    const candidateMap = new Map();
-    const mediaTypesToUse = mediaTypeFilter === 'all' ? ['movie', 'tv'] : [mediaTypeFilter];
-
-    // 1) Strong seed: direct search results that match query/franchise terms.
-    directResults.forEach(item => {
-        const itemType = getMediaType(item, mediaTypeFilter);
-        if (!mediaTypesToUse.includes(itemType)) return;
-        if (!matchesDistinctiveFranchiseTerms(item, query, franchiseTerms)) return;
-        const titleMatchStrength = getFranchiseTitleMatchStrength(item, definition);
-        const score = titleMatchStrength === 'exact' ? 78 : titleMatchStrength === 'prefix' ? 70 : 60;
-        addSignalCandidate(candidateMap, item, itemType, score, 'Direct franchise title match', 'direct');
-    });
-
-    // 2) Expansion from known franchise terms.
-    franchiseSearchResults.forEach(data => {
-        (data.results || []).forEach(item => {
-            const itemType = getMediaType(item, mediaTypeFilter);
-            if (!mediaTypesToUse.includes(itemType)) return;
-            if (!matchesDistinctiveFranchiseTerms(item, query, franchiseTerms)) return;
-            const titleMatchStrength = getFranchiseTitleMatchStrength(item, definition);
-            const score = titleMatchStrength === 'exact' ? 76 : titleMatchStrength === 'prefix' ? 68 : 34;
-            const category = titleMatchStrength === 'exact' || titleMatchStrength === 'prefix' ? 'alias' : 'term';
-            const reason = category === 'alias' ? 'Known franchise title match' : 'Franchise term search';
-            addSignalCandidate(candidateMap, item, itemType, score, reason, category);
-        });
-    });
-
-    // 3) TMDB keyword expansion for the query and franchise synonyms.
-    const queryKeywordIds = await fetchKeywordIds(terms.slice(0, 8));
-    const keywordDiscoverResults = await Promise.all(
-        mediaTypesToUse.map(type => fetchDiscoverByKeywords(queryKeywordIds, type))
-    );
-    keywordDiscoverResults.forEach((items, idx) => {
-        const mediaType = mediaTypesToUse[idx];
-        items.forEach(item => {
-            if (!matchesDistinctiveFranchiseTerms(item, query, franchiseTerms)) return;
-            addSignalCandidate(candidateMap, item, mediaType, 18, 'Keyword expansion', 'keyword');
-        });
-    });
-
-    // 4) Seed-item graph expansion using recommendations/similar and seed keywords.
-    const seedItems = directResults
-        .filter(item => mediaTypesToUse.includes(getMediaType(item, mediaTypeFilter)))
-        .filter(item => matchesDistinctiveFranchiseTerms(item, query, franchiseTerms))
-        .slice(0, 6);
-
-    const seedDetailsList = await Promise.all(
-        seedItems.map(item => fetchMediaSignalDetails(item.id, getMediaType(item, mediaTypeFilter)))
-    );
-
-    const seedKeywordIds = new Set();
-    for (let i = 0; i < seedDetailsList.length; i++) {
-        const seed = seedItems[i];
-        const seedType = getMediaType(seed, mediaTypeFilter);
-        const details = seedDetailsList[i];
-        if (!details) continue;
-
-        getKeywordIdsFromDetails(details, seedType).forEach(id => seedKeywordIds.add(id));
-
-        (details.recommendations?.results || []).forEach(item => {
-            if (!matchesDistinctiveFranchiseTerms(item, query, franchiseTerms)) return;
-            addSignalCandidate(candidateMap, item, seedType, 22, `Recommended from "${getMediaTitle(seed)}"`, 'graph');
-        });
-
-        (details.similar?.results || []).forEach(item => {
-            if (!matchesDistinctiveFranchiseTerms(item, query, franchiseTerms)) return;
-            addSignalCandidate(candidateMap, item, seedType, 18, `Similar to "${getMediaTitle(seed)}"`, 'graph');
-        });
-
-        if (seedType === 'movie' && details.belongs_to_collection?.id) {
-            const parts = await fetchCollectionParts(details.belongs_to_collection.id);
-            parts.forEach(item => {
-                if (!matchesDistinctiveFranchiseTerms(item, query, franchiseTerms)) return;
-                addSignalCandidate(candidateMap, item, 'movie', 42, `Collection part of "${getMediaTitle(seed)}"`, 'collection');
-            });
-        }
-    }
-
-    if (seedKeywordIds.size > 0) {
-        const seededKeywordResults = await Promise.all(
-            mediaTypesToUse.map(type => fetchDiscoverByKeywords([...seedKeywordIds], type))
-        );
-        seededKeywordResults.forEach((items, idx) => {
-            const mediaType = mediaTypesToUse[idx];
-            items.forEach(item => {
-                if (!matchesDistinctiveFranchiseTerms(item, query, franchiseTerms)) return;
-                addSignalCandidate(candidateMap, item, mediaType, 14, 'Seed keyword expansion', 'keyword');
-            });
-        });
-    }
-
-    // 5) Keep official collections as a weak fallback, not a primary source.
-    if (collections.length > 0) {
-        const collectionParts = await Promise.all(
-            collections.slice(0, 3).map(async collection => ({
-                collection,
-                parts: await fetchCollectionParts(collection.id)
-            }))
-        );
-
-        collectionParts.forEach(({ collection, parts }) => {
-            const isTrustedCollection = isTrustedFranchiseCollection(collection, definition);
-            parts.forEach(item => {
-                if (!isTrustedCollection && !matchesDistinctiveFranchiseTerms(item, query, franchiseTerms)) return;
-                addSignalCandidate(
-                    candidateMap,
-                    item,
-                    'movie',
-                    isTrustedCollection ? 62 : 34,
-                    isTrustedCollection ? `Official "${collection.name}" member` : 'Official TMDB collection',
-                    isTrustedCollection ? 'officialCollection' : 'collection'
-                );
-            });
-        });
-    }
-
-    return [...candidateMap.values()]
-        .map(candidate => ({
-            ...candidate.item,
-            _franchiseScore: candidate.score,
-            _franchiseConfidence: confidenceFromScore(candidate.score),
-            _franchiseReasons: [...candidate.reasons],
-            _franchiseSignalCount: candidate.categories.size,
-            _franchiseCategories: [...candidate.categories],
-            _franchiseTier: getFranchiseContentTier(candidate.item, definition)
-        }))
-        .filter(item => {
-            const hasStrongTitleMatch = matchesDistinctiveFranchiseTerms(item, query, franchiseTerms);
-            const categories = new Set(item._franchiseCategories || []);
-            const hasCollectionEvidence = categories.has('collection');
-            const hasOfficialCollectionEvidence = categories.has('officialCollection');
-            const hasDirectEvidence = categories.has('direct');
-            const hasAliasEvidence = categories.has('alias');
-            const hasEnoughSignals = (item._franchiseSignalCount || 0) >= definition.minSignalCategories;
-            const isStrongEnough = item._franchiseScore >= definition.minimumScore;
-            const hasMembershipEvidence = hasStrongTitleMatch || hasOfficialCollectionEvidence;
-
-            return item._franchiseTier !== 'excluded' && hasMembershipEvidence && (
-                hasOfficialCollectionEvidence ||
-                hasCollectionEvidence ||
-                hasDirectEvidence ||
-                hasAliasEvidence ||
-                (hasEnoughSignals && isStrongEnough)
-            );
-        })
-        .sort((a, b) => {
-            if (b._franchiseScore !== a._franchiseScore) return b._franchiseScore - a._franchiseScore;
-            return (b.popularity || 0) - (a.popularity || 0);
-        })
-        .slice(0, 80);
-}
-
-function mergeSearchResultSets(...resultSets) {
-    const merged = [];
-    const seen = new Set();
-
-    resultSets.flat().forEach(item => {
-        if (!item || !item.id || item.media_type === 'person') return;
-        const mediaType = item.media_type || item.mediaType || 'movie';
-        const key = `${mediaType}-${item.id}`;
-        if (seen.has(key)) return;
-
-        seen.add(key);
-        merged.push({
-            ...item,
-            media_type: mediaType,
-            mediaType
-        });
-    });
-
-    return merged;
-}
-
-function sortFranchisePrimaryResults(a, b) {
-    const tierWeight = {
-        primary: 2,
-        supplemental: 1,
-        excluded: 0
-    };
-    const tierDiff = (tierWeight[b._franchiseTier] || 0) - (tierWeight[a._franchiseTier] || 0);
-    if (tierDiff !== 0) return tierDiff;
-
-    if ((a._franchiseTier || 'primary') === 'primary' && (b._franchiseTier || 'primary') === 'primary') {
-        const dateA = getReleaseDateForMedia(a, a.media_type || a.mediaType || 'movie') || '9999-12-31';
-        const dateB = getReleaseDateForMedia(b, b.media_type || b.mediaType || 'movie') || '9999-12-31';
-        if (dateA !== dateB) return dateA.localeCompare(dateB);
-    }
-
-    const scoreDiff = Math.min(b._franchiseScore || 0, 220) - Math.min(a._franchiseScore || 0, 220);
-    if (scoreDiff !== 0) return scoreDiff;
-
-    const dateA = getReleaseDateForMedia(a, a.media_type || a.mediaType || 'movie') || '';
-    const dateB = getReleaseDateForMedia(b, b.media_type || b.mediaType || 'movie') || '';
-    if (dateA && dateB && dateA !== dateB) return dateA.localeCompare(dateB);
-
-    return (b.popularity || 0) - (a.popularity || 0);
-}
-
-async function searchMovies() {
-    const query = document.getElementById('search-input').value.trim();
-    const mediaTypeFilter = document.getElementById('media-type-filter').value;
-    const resultsContainer = document.getElementById('browse-results');
-
-    if (!query) {
-        showToast('Please enter a search term');
-        return;
-    }
-
-    if (!hasTMDBApiKey()) {
-        resultsContainer.innerHTML = renderTMDBSetupMessage('Search is disabled until a TMDB API key is configured.');
-        return;
-    }
-
-    resultsContainer.innerHTML = `<div class="loading"><div class="spinner"></div>Searching...</div>`;
-
-    try {
-        // Check if query matches a franchise keyword
-        const franchiseTerms = getFranchiseTermsForQuery(query);
-        const isFranchiseSearch = franchiseTerms.length > 0;
-        const effectiveMediaTypeFilter = isFranchiseSearch ? 'all' : mediaTypeFilter;
-
-        // Build collection search promises - only for movies (TMDB collections are movie-only)
-        const shouldSearchCollections = mediaTypeFilter !== 'tv';
-        const collectionSearchTerms = shouldSearchCollections ? [query, ...franchiseTerms] : [];
-        const uniqueCollectionTerms = [...new Set(collectionSearchTerms)];
-
-        const collectionPromises = shouldSearchCollections
-            ? uniqueCollectionTerms.map(term =>
-                fetch(`${TMDB_BASE_URL}/search/collection?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(term)}&page=1`)
-                    .then(r => r.json())
-            )
-            : [];
-
-        // Franchise search: broaden search across related terms to build a "smart" franchise list
-        const MAX_FRANCHISE_TERMS = 32;
-        const franchiseDefinition = getFranchiseDefinition(query, franchiseTerms);
-        const franchiseSearchTerms = isFranchiseSearch
-            ? [...new Set([...franchiseTerms, ...franchiseDefinition.aliases])]
-                .filter(term => term && term.length >= 4)
-                .slice(0, MAX_FRANCHISE_TERMS)
-            : [];
-        const franchisePromises = franchiseSearchTerms.map(term =>
-            fetch(`${TMDB_BASE_URL}/search/multi?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(term)}&page=1`)
-                .then(r => r.json())
-        );
-
-        // For movie/TV search, only search the original query (multiple pages for better coverage)
-        const searchPromises = [];
-        const pagesToFetch = isFranchiseSearch ? 3 : 2;
-        for (let page = 1; page <= pagesToFetch; page++) {
-            searchPromises.push(
-                fetch(`${TMDB_BASE_URL}/search/multi?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(query)}&page=${page}`)
-                    .then(r => r.json())
-            );
-        }
-
-        // Fetch all searches and collections in parallel
-        const [collectionResults, searchResults, franchiseSearchResults] = await Promise.all([
-            Promise.all(collectionPromises),
-            Promise.all(searchPromises),
-            Promise.all(franchisePromises)
-        ]);
-
-        // Merge all collection results and remove duplicates
-        let allCollections = [];
-        if (shouldSearchCollections) {
-            const seenCollectionIds = new Set();
-            collectionResults.forEach(data => {
-                (data.results || []).forEach(collection => {
-                    if (!seenCollectionIds.has(collection.id)) {
-                        seenCollectionIds.add(collection.id);
-                        allCollections.push(collection);
-                    }
-                });
-            });
-
-            allCollections = filterAndRankCollections(allCollections, query, franchiseTerms).slice(0, 12);
-        }
-
-        // Merge search results and remove duplicates
-        const seenIds = new Set();
-        let allResults = [];
-        searchResults.forEach(data => {
-            (data.results || []).forEach(item => {
-                const uniqueKey = `${item.media_type}-${item.id}`;
-                if (!seenIds.has(uniqueKey) && item.media_type !== 'person') {
-                    seenIds.add(uniqueKey);
-                    allResults.push(item);
-                }
-            });
-        });
-
-        // Filter results based on media type selection
-        let results = allResults.filter(item => {
-            if (effectiveMediaTypeFilter === 'movie') return item.media_type === 'movie';
-            if (effectiveMediaTypeFilter === 'tv') return item.media_type === 'tv';
-            return true;
-        });
-
-        // Add media_type to each result if not present
-        results = results.map(item => ({
-            ...item,
-            mediaType: item.media_type || 'movie'
-        }));
-
-        // Sort results by popularity for better ordering
-        results.sort((a, b) => (b.popularity || 0) - (a.popularity || 0));
-
-        // Build confidence-ranked franchise group from multiple TMDB signals.
-        const allFranchiseResults = await buildSmartFranchiseResults({
-            query,
-            mediaTypeFilter: effectiveMediaTypeFilter,
-            directResults: results,
-            franchiseSearchResults,
-            collections: allCollections,
-            franchiseTerms
-        });
-
-        if (isFranchiseSearch) {
-            const franchiseKeySet = new Set(allFranchiseResults.map(item => `${item.media_type || item.mediaType}-${item.id}`));
-            const filteredDirectResults = results.filter(item => {
-                const key = `${item.media_type || item.mediaType}-${item.id}`;
-                return franchiseKeySet.has(key) || matchesDistinctiveFranchiseTerms(item, query, franchiseTerms);
-            });
-
-            const primaryFranchiseResults = allFranchiseResults.length > 0 ? allFranchiseResults : filteredDirectResults;
-
-            results = mergeSearchResultSets(primaryFranchiseResults)
-                .filter(item => matchesDistinctiveFranchiseTerms(item, query, franchiseTerms) || (item._franchiseCategories || []).includes('officialCollection'))
-                .filter(item => (item._franchiseTier || 'primary') === 'primary')
-                .sort(sortFranchisePrimaryResults);
-        }
-
-        const shouldShowFranchise = !isFranchiseSearch && allFranchiseResults.length >= 3;
-
-        if (results.length > 0 || allCollections.length > 0 || shouldShowFranchise) {
-            renderSearchResults(results, mediaTypeFilter, query, allCollections, shouldShowFranchise ? allFranchiseResults : []);
-        } else {
-            resultsContainer.innerHTML = `
-                <div class="empty-state">
-                    <div class="empty-state-icon">🔍</div>
-                    <div class="empty-state-text">No results found for "${query}"</div>
-                </div>
-            `;
-        }
-    } catch (error) {
-        console.error('Search error:', error);
-        resultsContainer.innerHTML = `
-            <div class="empty-state">
-                <div class="empty-state-icon">❌</div>
-                <div class="empty-state-text">Error searching. Please try again.</div>
-            </div>
-        `;
-        showToast('Error searching');
-    }
-}
-
-function renderSearchResults(results, mediaType = 'movie', query = '', collections = [], franchiseResults = []) {
-    // Store current state for re-rendering
-    currentBrowseState = {
-        mode: 'search',
-        results: results,
-        mediaType: mediaType,
-        query: query,
-        year: null,
-        yearMode: 'best',
-        genreId: '',
-        activeFilter: 'search',
-        collections: collections,
-        franchiseResults: franchiseResults,
-        collectionId: null,
-        previousState: null
-    };
-
-    renderSearchGrid(results, query, collections, franchiseResults);
-}
-
-function renderSearchGrid(results, query, collections = [], franchiseResults = []) {
-    const container = document.getElementById('browse-results');
-
-    let html = `<div style="margin-bottom: 20px; color: var(--text-secondary);">
-        Search results for "${query}" - ${results.length} items found
-    </div>`;
-
-    if (franchiseResults.length > 0) {
-        html += `
-            <div class="collections-section" style="margin-bottom: 30px;">
-                <div class="collections-toggle" onclick="toggleFranchiseResults()" style="
-                    cursor: pointer;
-                    display: flex;
-                    align-items: center;
-                    gap: 10px;
-                    padding: 12px 16px;
-                    background: var(--bg-card);
-                    border: 1px solid var(--border);
-                    border-radius: 10px;
-                    user-select: none;
-                    transition: all 0.2s;
-                ">
-                    <span class="collections-arrow" id="franchise-arrow" style="
-                        display: inline-block;
-                        transition: transform 0.3s;
-                        font-size: 14px;
-                    ">&#9654;</span>
-                    <h3 style="margin: 0; color: var(--text-primary); font-size: 16px;">Franchise Matches (${franchiseResults.length})</h3>
-                </div>
-                <div style="margin-top: 8px; color: var(--text-secondary); font-size: 12px;">
-                    Curated from title membership, official franchise links, and stronger TMDB evidence.
-                </div>
-                <div class="collections-grid" id="franchise-grid" style="display: none; gap: 15px; flex-wrap: wrap; margin-top: 15px;">
-                    ${franchiseResults.filter(item => !isItemHidden(item.id, item.media_type || 'movie')).map(item => {
-                        const title = item.title || item.name;
-                        const releaseDate = item.release_date || item.first_air_date;
-                        const confidence = item._franchiseConfidence || 'medium';
-                        const confidenceColor = confidence === 'high' ? 'var(--success)' : 'var(--accent)';
-                        const confidenceLabel = confidence === 'high' ? 'High confidence' : 'Medium confidence';
-                        const reasonCount = (item._franchiseReasons || []).length;
-                        const reasonLabel = reasonCount === 1 ? '1 signal' : `${reasonCount} signals`;
-                        return `
-                            <div class="collection-card" onclick="showMediaDetail(${item.id}, null, '${item.media_type}')" style="
-                                cursor: pointer;
-                                background: var(--bg-card);
-                                border: 1px solid var(--border);
-                                border-radius: 12px;
-                                padding: 15px;
-                                display: flex;
-                                align-items: center;
-                                gap: 12px;
-                                transition: all 0.2s;
-                                min-width: 250px;
-                            ">
-                                ${item.poster_path ?
-                                    `<img src="${TMDB_IMAGE_BASE.replace('w500', 'w92')}${item.poster_path}"
-                                        alt="${title}"
-                                        style="width: 50px; height: 75px; object-fit: cover; border-radius: 6px;">` :
-                                    `<div style="width: 50px; height: 75px; background: var(--bg-secondary); border-radius: 6px; display: flex; align-items: center; justify-content: center;">🎬</div>`
-                                }
-                                <div>
-                                    <div style="font-weight: 600; color: var(--text-primary);">${title}</div>
-                                    <div style="font-size: 12px; color: var(--text-secondary);">
-                                        ${releaseDate ? releaseDate.split('-')[0] : 'N/A'} ${item.media_type === 'tv' ? '• TV' : ''}
-                                    </div>
-                                    <div style="font-size: 12px; color: ${confidenceColor};">${confidenceLabel}</div>
-                                    <div style="font-size: 11px; color: var(--text-secondary);">${reasonLabel}</div>
-                                </div>
-                            </div>
-                        `;
-                    }).join('')}
-                </div>
-            </div>
-        `;
-    }
-
-    // Show collections if any (collapsible, hidden by default)
-    if (collections.length > 0) {
-        html += `
-            <div class="collections-section" style="margin-bottom: 30px;">
-                <div class="collections-toggle" onclick="toggleCollections()" style="
-                    cursor: pointer;
-                    display: flex;
-                    align-items: center;
-                    gap: 10px;
-                    padding: 12px 16px;
-                    background: var(--bg-card);
-                    border: 1px solid var(--border);
-                    border-radius: 10px;
-                    user-select: none;
-                    transition: all 0.2s;
-                ">
-                    <span class="collections-arrow" id="collections-arrow" style="
-                        display: inline-block;
-                        transition: transform 0.3s;
-                        font-size: 14px;
-                    ">&#9654;</span>
-                    <h3 style="margin: 0; color: var(--text-primary); font-size: 16px;">Collections & Franchises (${collections.length} found)</h3>
-                </div>
-                <div class="collections-grid" id="collections-grid" style="display: none; gap: 15px; flex-wrap: wrap; margin-top: 15px;">
-                    ${collections.slice(0, 20).map(collection => `
-                        <div class="collection-card" onclick="loadCollection(${collection.id})" style="
-                            cursor: pointer;
-                            background: var(--bg-card);
-                            border: 1px solid var(--border);
-                            border-radius: 12px;
-                            padding: 15px;
-                            display: flex;
-                            align-items: center;
-                            gap: 12px;
-                            transition: all 0.2s;
-                            min-width: 250px;
-                        ">
-                            ${collection.poster_path ?
-                                `<img src="${TMDB_IMAGE_BASE.replace('w500', 'w92')}${collection.poster_path}"
-                                    alt="${collection.name}"
-                                    style="width: 50px; height: 75px; object-fit: cover; border-radius: 6px;">` :
-                                `<div style="width: 50px; height: 75px; background: var(--bg-secondary); border-radius: 6px; display: flex; align-items: center; justify-content: center;">🎬</div>`
-                            }
-                            <div>
-                                <div style="font-weight: 600; color: var(--text-primary);">${collection.name}</div>
-                                <div style="font-size: 12px; color: var(--accent);">View all movies →</div>
-                            </div>
-                        </div>
-                    `).join('')}
-                </div>
-            </div>
-        `;
-    }
-
-    html += '<div class="movie-grid"></div>';
-    container.innerHTML = html;
-
-    const grid = container.querySelector('.movie-grid');
-
-    results.slice(0, 60).forEach(item => {
-        const mediaType = item.media_type || item.mediaType || 'movie';
-        const title = item.title || item.name;
-        const releaseDate = item.release_date || item.first_air_date;
-
-        // Skip hidden items
-        if (isItemHidden(item.id, mediaType)) return;
-
-        const isInWatchlist = movies.watchlist.some(m => m.id === item.id && (m.mediaType || 'movie') === mediaType);
-        const isWatched = movies.watched.some(m => m.id === item.id && (m.mediaType || 'movie') === mediaType);
-
-        const card = document.createElement('div');
-        card.className = 'movie-card';
-        card.innerHTML = `
-            <img
-                src="${item.poster_path ? TMDB_IMAGE_BASE + item.poster_path : 'https://via.placeholder.com/500x750?text=No+Poster'}"
-                alt="${title}"
-                class="movie-poster"
-            />
-            <div class="movie-info">
-                <div class="movie-title">${title}</div>
-                <div class="movie-year">${releaseDate ? releaseDate.split('-')[0] : 'N/A'} ${mediaType === 'tv' ? '• TV' : ''}</div>
-                ${item.vote_average ? `<div style="margin: 5px 0; font-size: 13px; color: var(--text-secondary);">⭐ ${item.vote_average.toFixed(1)}/10</div>` : ''}
-                <div class="movie-actions">
-                    ${!isInWatchlist && !isWatched ?
-                        `<button class="btn btn-primary btn-small" onclick="event.stopPropagation(); addToWatchlist(${item.id}, '${mediaType}')">+ Watchlist</button>` :
-                        ''}
-                    ${isInWatchlist ?
-                        `<button class="btn btn-danger btn-small" onclick="event.stopPropagation(); removeFromWatchlist(${item.id}, '${mediaType}')">− Watchlist</button>` :
-                        ''}
-                    ${!isWatched ?
-                        `<button class="btn btn-secondary btn-small" onclick="event.stopPropagation(); addToWatched(${item.id}, '${mediaType}')">✓ Watched</button>` :
-                        `<button class="btn btn-danger btn-small" onclick="event.stopPropagation(); removeFromWatched(${item.id}, '${mediaType}')">✗ Unwatch</button>`}
-                </div>
-                <button class="btn btn-small streaming-btn" onclick="event.stopPropagation(); showStreamingInfo(${item.id}, '${mediaType}')" style="margin-top: 8px; width: 100%; background: var(--bg-secondary); border: 1px solid var(--border);">
-                    📺 Where to Watch
-                </button>
-                <button class="btn btn-small" onclick="event.stopPropagation(); hideItem(${item.id}, '${mediaType}')" style="margin-top: 4px; width: 100%; background: transparent; border: 1px solid var(--border); color: var(--text-secondary); font-size: 11px;">
-                    🚫 Not Interested
-                </button>
-            </div>
-        `;
-
-        card.querySelector('.movie-poster').addEventListener('click', () => showMediaDetail(item.id, null, mediaType));
-        grid.appendChild(card);
-    });
-}
-
-function renderBrowseGrid(results, mediaType, query = null, year = null) {
-    const container = document.getElementById('browse-results');
-    const mediaLabel = mediaType === 'tv' ? 'TV shows' : 'movies';
-    const yearMode = currentBrowseState.yearMode || 'best';
-    const yearModeLabel = yearMode === 'popular' ? 'most popular' : 'best reviewed';
-
-    let headerHTML = '';
-    if (query) {
-        headerHTML = `<div style="margin-bottom: 20px; color: var(--text-secondary);">
-            Search results for "${query}" - ${results.length} ${mediaLabel} found
-        </div>`;
-    } else if (year) {
-        headerHTML = `<div style="margin-bottom: 20px; color: var(--text-secondary);">
-            Showing the ${yearModeLabel} ${mediaLabel} from ${year}
-        </div>`;
-    }
-
-    container.innerHTML = headerHTML + '<div class="movie-grid"></div>';
-    const grid = container.querySelector('.movie-grid');
-
-    const displayResults = (year || query) ? results : results.slice(0, 20);
-
-    displayResults.forEach(item => {
-        const title = item.title || item.name;
-        const releaseDate = item.release_date || item.first_air_date;
-
-        // Skip hidden items
-        if (isItemHidden(item.id, mediaType)) return;
-
-        const isInWatchlist = movies.watchlist.some(m => m.id === item.id && (m.mediaType || 'movie') === mediaType);
-        const isWatched = movies.watched.some(m => m.id === item.id && (m.mediaType || 'movie') === mediaType);
-
-        const card = document.createElement('div');
-        card.className = 'movie-card';
-        card.innerHTML = `
-            <img
-                src="${item.poster_path ? TMDB_IMAGE_BASE + item.poster_path : 'https://via.placeholder.com/500x750?text=No+Poster'}"
-                alt="${title}"
-                class="movie-poster"
-            />
-            <div class="movie-info">
-                <div class="movie-title">${title}</div>
-                <div class="movie-year">${releaseDate ? releaseDate.split('-')[0] : 'N/A'}</div>
-                ${item.vote_average ? `<div style="margin: 5px 0; font-size: 13px; color: var(--text-secondary);">⭐ ${item.vote_average.toFixed(1)}/10</div>` : ''}
-                <div class="movie-actions">
-                    ${!isInWatchlist && !isWatched ?
-                        `<button class="btn btn-primary btn-small" onclick="event.stopPropagation(); addToWatchlist(${item.id}, '${mediaType}')">+ Watchlist</button>` :
-                        ''}
-                    ${isInWatchlist ?
-                        `<button class="btn btn-danger btn-small" onclick="event.stopPropagation(); removeFromWatchlist(${item.id}, '${mediaType}')">− Watchlist</button>` :
-                        ''}
-                    ${!isWatched ?
-                        `<button class="btn btn-secondary btn-small" onclick="event.stopPropagation(); addToWatched(${item.id}, '${mediaType}')">✓ Watched</button>` :
-                        `<button class="btn btn-danger btn-small" onclick="event.stopPropagation(); removeFromWatched(${item.id}, '${mediaType}')">✗ Unwatch</button>`}
-                </div>
-                <button class="btn btn-small streaming-btn" onclick="event.stopPropagation(); showStreamingInfo(${item.id}, '${mediaType}')" style="margin-top: 8px; width: 100%; background: var(--bg-secondary); border: 1px solid var(--border);">
-                    📺 Where to Watch
-                </button>
-                <button class="btn btn-small" onclick="event.stopPropagation(); hideItem(${item.id}, '${mediaType}')" style="margin-top: 4px; width: 100%; background: transparent; border: 1px solid var(--border); color: var(--text-secondary); font-size: 11px;">
-                    🚫 Not Interested
-                </button>
-            </div>
-        `;
-
-        card.querySelector('.movie-poster').addEventListener('click', () => showMediaDetail(item.id, null, mediaType));
-        grid.appendChild(card);
-    });
-}
-
-// Show streaming info in a popup
-async function showStreamingInfo(mediaId, mediaType) {
-    showToast('Loading streaming info...');
-
-    try {
-        const response = await fetch(
-            `${TMDB_BASE_URL}/${mediaType}/${mediaId}/watch/providers?api_key=${TMDB_API_KEY}`
-        );
-        const data = await response.json();
-        const usProviders = data.results?.US;
-
-        if (!usProviders) {
-            showToast('No streaming info available for US');
-            return;
-        }
-
-        const providers = [];
-        if (usProviders.flatrate) providers.push(...usProviders.flatrate.map(p => ({ ...p, type: 'Stream' })));
-        if (usProviders.rent) providers.push(...usProviders.rent.map(p => ({ ...p, type: 'Rent' })));
-        if (usProviders.buy) providers.push(...usProviders.buy.map(p => ({ ...p, type: 'Buy' })));
-
-        // Remove duplicates
-        const uniqueProviders = [...new Map(providers.map(p => [p.provider_id, p])).values()];
-
-        if (uniqueProviders.length === 0) {
-            showToast('No streaming options available');
-            return;
-        }
-
-        // Show in a modal-like overlay
-        showStreamingModal(uniqueProviders, usProviders.link);
-    } catch (error) {
-        console.error('Error fetching streaming info:', error);
-        showToast('Error loading streaming info');
-    }
-}
-
-function showStreamingModal(providers, justWatchLink) {
-    // Create overlay
-    const overlay = document.createElement('div');
-    overlay.className = 'streaming-overlay';
-    overlay.style.cssText = `
-        position: fixed;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        background: rgba(0,0,0,0.8);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        z-index: 1001;
-    `;
-
-    const streamProviders = providers.filter(p => p.type === 'Stream');
-    const rentProviders = providers.filter(p => p.type === 'Rent');
-    const buyProviders = providers.filter(p => p.type === 'Buy');
-
-    // Helper to create provider item (non-clickable, just displays the provider)
-    const createProviderItem = (p) => {
-        return `
-            <div style="text-align: center;">
-                <img src="${TMDB_IMAGE_BASE.replace('w500', 'w92')}${p.logo_path}"
-                    alt="${p.provider_name}"
-                    title="${p.provider_name}"
-                    style="width: 50px; height: 50px; border-radius: 10px; border: 2px solid var(--border);">
-                <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px; max-width: 60px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${p.provider_name}</div>
-            </div>
-        `;
-    };
-
-    overlay.innerHTML = `
-        <div style="
-            background: var(--bg-card);
-            border-radius: 16px;
-            padding: 25px;
-            max-width: 500px;
-            width: 90%;
-            max-height: 80vh;
-            overflow-y: auto;
-        ">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-                <h3 style="color: var(--text-primary); margin: 0;">Where to Watch (US)</h3>
-                <button onclick="this.closest('.streaming-overlay').remove()" style="
-                    background: none;
-                    border: none;
-                    font-size: 24px;
-                    cursor: pointer;
-                    color: var(--text-secondary);
-                ">&times;</button>
-            </div>
-
-            ${streamProviders.length > 0 ? `
-                <div style="margin-bottom: 20px;">
-                    <h4 style="color: var(--text-secondary); font-size: 14px; margin-bottom: 10px;">Stream</h4>
-                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                        ${streamProviders.map(p => createProviderItem(p)).join('')}
-                    </div>
-                </div>
-            ` : ''}
-
-            ${rentProviders.length > 0 ? `
-                <div style="margin-bottom: 20px;">
-                    <h4 style="color: var(--text-secondary); font-size: 14px; margin-bottom: 10px;">Rent</h4>
-                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                        ${rentProviders.slice(0, 6).map(p => createProviderItem(p)).join('')}
-                    </div>
-                </div>
-            ` : ''}
-
-            ${buyProviders.length > 0 ? `
-                <div style="margin-bottom: 20px;">
-                    <h4 style="color: var(--text-secondary); font-size: 14px; margin-bottom: 10px;">Buy</h4>
-                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                        ${buyProviders.slice(0, 6).map(p => createProviderItem(p)).join('')}
-                    </div>
-                </div>
-            ` : ''}
-
-            ${justWatchLink ? `
-                <a href="${justWatchLink}" target="_blank" class="btn btn-primary" style="width: 100%; text-align: center; display: block; text-decoration: none;">
-                    🔗 Open on JustWatch to Watch
-                </a>
-                <p style="font-size: 11px; color: var(--text-secondary); margin-top: 10px; text-align: center;">
-                    JustWatch will link you directly to the streaming service
-                </p>
-            ` : ''}
-        </div>
-    `;
-
-    overlay.addEventListener('click', (e) => {
-        if (e.target === overlay) overlay.remove();
-    });
-
-    document.body.appendChild(overlay);
-}
-
-function renderCollectionResults(state) {
-    const resultsContainer = document.getElementById('browse-results');
-    const previousState = state.previousState;
-
-    let html = `
-        <div style="margin-bottom: 20px;">
-            <button class="btn btn-secondary btn-small" onclick="goBackFromCollection()" style="margin-bottom: 15px;">← Back to results</button>
-            <h3 style="color: var(--text-primary);">${state.query}</h3>
-            <p style="color: var(--text-secondary);">${state.results.length} movies in this collection</p>
-        </div>
-    `;
-    html += '<div class="movie-grid"></div>';
-    resultsContainer.innerHTML = html;
-
-    const grid = resultsContainer.querySelector('.movie-grid');
-    state.results.forEach(item => {
-        if (isItemHidden(item.id, 'movie')) return;
-
-        const isInWatchlist = movies.watchlist.some(m => m.id === item.id && (m.mediaType || 'movie') === 'movie');
-        const isWatched = movies.watched.some(m => m.id === item.id && (m.mediaType || 'movie') === 'movie');
-
-        const card = document.createElement('div');
-        card.className = 'movie-card';
-        card.innerHTML = `
-            <img
-                src="${item.poster_path ? TMDB_IMAGE_BASE + item.poster_path : 'https://via.placeholder.com/500x750?text=No+Poster'}"
-                alt="${item.title}"
-                class="movie-poster"
-            />
-            <div class="movie-info">
-                <div class="movie-title">${item.title}</div>
-                <div class="movie-year">${item.release_date ? item.release_date.split('-')[0] : 'N/A'}</div>
-                ${item.vote_average ? `<div style="margin: 5px 0; font-size: 13px; color: var(--text-secondary);">⭐ ${item.vote_average.toFixed(1)}/10</div>` : ''}
-                <div class="movie-actions">
-                    ${!isInWatchlist && !isWatched ?
-                        `<button class="btn btn-primary btn-small" onclick="event.stopPropagation(); addToWatchlist(${item.id}, 'movie')">+ Watchlist</button>` :
-                        ''}
-                    ${isInWatchlist ?
-                        `<button class="btn btn-danger btn-small" onclick="event.stopPropagation(); removeFromWatchlist(${item.id}, 'movie')">− Watchlist</button>` :
-                        ''}
-                    ${!isWatched ?
-                        `<button class="btn btn-secondary btn-small" onclick="event.stopPropagation(); addToWatched(${item.id}, 'movie')">✓ Watched</button>` :
-                        `<button class="btn btn-danger btn-small" onclick="event.stopPropagation(); removeFromWatched(${item.id}, 'movie')">✗ Unwatch</button>`}
-                </div>
-                <button class="btn btn-small streaming-btn" onclick="event.stopPropagation(); showStreamingInfo(${item.id}, 'movie')" style="margin-top: 8px; width: 100%; background: var(--bg-secondary); border: 1px solid var(--border);">
-                    📺 Where to Watch
-                </button>
-                <button class="btn btn-small" onclick="event.stopPropagation(); hideItem(${item.id}, 'movie')" style="margin-top: 4px; width: 100%; background: transparent; border: 1px solid var(--border); color: var(--text-secondary); font-size: 11px;">
-                    🚫 Not Interested
-                </button>
-            </div>
-        `;
-
-        card.querySelector('.movie-poster').addEventListener('click', () => showMediaDetail(item.id, null, 'movie'));
-        grid.appendChild(card);
-    });
-
-    if (!previousState) {
-        const backButton = resultsContainer.querySelector('button');
-        backButton.style.display = 'none';
-    }
-}
-
-function goBackFromCollection() {
-    if (currentBrowseState.mode === 'collection' && currentBrowseState.previousState) {
-        restoreBrowseState(currentBrowseState.previousState);
-        return;
-    }
-
-    initializeBrowse();
-}
-
-async function loadCollection(collectionId) {
-    const resultsContainer = document.getElementById('browse-results');
-    resultsContainer.innerHTML = `<div class="loading"><div class="spinner"></div>Loading collection...</div>`;
-
-    try {
-        const response = await fetch(
-            `${TMDB_BASE_URL}/collection/${collectionId}?api_key=${TMDB_API_KEY}`
-        );
-        const collection = await response.json();
-
-        if (collection.parts && collection.parts.length > 0) {
-            const sortedParts = collection.parts.sort((a, b) =>
-                (a.release_date || '').localeCompare(b.release_date || '')
-            );
-
-            currentBrowseState = {
-                mode: 'collection',
-                results: sortedParts,
-                mediaType: 'movie',
-                query: collection.name,
-                year: null,
-                yearMode: 'best',
-                genreId: '',
-                activeFilter: 'collection',
-                collections: [],
-                franchiseResults: [],
-                collectionId: collectionId,
-                previousState: cloneBrowseState(currentBrowseState)
-            };
-
-            renderCollectionResults(currentBrowseState);
-        }
-    } catch (error) {
-        console.error('Error loading collection:', error);
-        showToast('Error loading collection');
-    }
-}
-
-async function getMovieDetails(movieId) {
-    if (!hasTMDBApiKey()) return null;
-
-    try {
-        const response = await fetch(
-            `${TMDB_BASE_URL}/movie/${movieId}?api_key=${TMDB_API_KEY}&append_to_response=credits,watch/providers,external_ids`
-        );
-        return await response.json();
-    } catch (error) {
-        console.error('Error fetching movie details:', error);
-        return null;
-    }
-}
-
-async function getTVDetails(tvId) {
-    if (!hasTMDBApiKey()) return null;
-
-    try {
-        const response = await fetch(
-            `${TMDB_BASE_URL}/tv/${tvId}?api_key=${TMDB_API_KEY}&append_to_response=credits,watch/providers,external_ids`
-        );
-        return await response.json();
-    } catch (error) {
-        console.error('Error fetching TV show details:', error);
-        return null;
-    }
-}
-
-async function getMediaDetails(mediaId, mediaType) {
-    return mediaType === 'tv' ? getTVDetails(mediaId) : getMovieDetails(mediaId);
-}
-
-// ============= Browse Movies & TV Shows =============
-
-let movieGenresCache = null;
-let tvGenresCache = null;
-
-async function fetchGenres(mediaType = 'movie') {
-    const cache = mediaType === 'tv' ? tvGenresCache : movieGenresCache;
-    if (cache) return cache;
-
-    if (!hasTMDBApiKey()) return [];
-
-    try {
-        const response = await fetch(
-            `${TMDB_BASE_URL}/genre/${mediaType}/list?api_key=${TMDB_API_KEY}`
-        );
-        const data = await response.json();
-        const genres = data.genres || [];
-
-        if (mediaType === 'tv') {
-            tvGenresCache = genres;
-        } else {
-            movieGenresCache = genres;
-        }
-
-        return genres;
-    } catch (error) {
-        console.error('Error fetching genres:', error);
-        return [];
-    }
-}
-
-async function updateGenresForMediaType() {
-    const mediaType = document.getElementById('media-type-filter').value;
-    const genreFilter = document.getElementById('genre-filter');
-
-    // Clear current options except "All Genres"
-    genreFilter.innerHTML = '<option value="">All Genres</option>';
-
-    // Load genres for the selected media type
-    const genres = await fetchGenres(mediaType);
-    genres.forEach(genre => {
-        const option = document.createElement('option');
-        option.value = genre.id;
-        option.textContent = genre.name;
-        genreFilter.appendChild(option);
-    });
-}
-
-function populateYearFilter() {
-    const yearFilter = document.getElementById('year-filter');
-    const previousValue = yearFilter.value;
-    const currentYear = new Date().getFullYear();
-    const earliestYear = 1950;
-
-    yearFilter.innerHTML = '<option value="">Choose a year</option>';
-
-    for (let year = currentYear; year >= earliestYear; year--) {
-        const option = document.createElement('option');
-        option.value = year;
-        option.textContent = year;
-        yearFilter.appendChild(option);
-    }
-
-    if (previousValue && Number(previousValue) >= earliestYear && Number(previousValue) <= currentYear) {
-        yearFilter.value = previousValue;
-    }
-}
-
-async function initializeBrowse() {
-    // Load genres into dropdown
-    const genreFilter = document.getElementById('genre-filter');
-
-    if (genreFilter.options.length === 1) { // Only has "All Genres"
-        const genres = await fetchGenres('movie'); // Default to movies
-        genres.forEach(genre => {
-            const option = document.createElement('option');
-            option.value = genre.id;
-            option.textContent = genre.name;
-            genreFilter.appendChild(option);
-        });
-    }
-
-    // Load years into dropdown
-    populateYearFilter();
-
-    // Load default content (popular movies)
-    loadBrowseMovies('popular');
-}
-
-async function loadBrowseMovies(filter) {
-    const resultsContainer = document.getElementById('browse-results');
-    const activeFilter = filter || document.querySelector('.filter-btn.active').dataset.filter;
-    const genreId = document.getElementById('genre-filter').value;
-    const selectedYear = document.getElementById('year-filter').value;
-    const yearMode = document.getElementById('year-mode-filter').value;
-    const mediaType = document.getElementById('media-type-filter').value;
-
-    const mediaLabel = mediaType === 'tv' ? 'TV shows' : 'movies';
-
-    if (!hasTMDBApiKey()) {
-        resultsContainer.innerHTML = renderTMDBSetupMessage(`Browse is disabled until a TMDB API key is configured for ${mediaLabel}.`);
-        return;
-    }
-
-    resultsContainer.innerHTML = `<div class="loading"><div class="spinner"></div>Loading ${mediaLabel}...</div>`;
-
-    try {
-        let results = [];
-
-        switch(activeFilter) {
-            case 'trending':
-                results = await fetchTrendingResults(mediaType, { genreId, pageLimit: 2 });
-                break;
-
-            case 'by_year':
-                if (!selectedYear) {
-                    resultsContainer.innerHTML = `
-                        <div class="empty-state">
-                            <div class="empty-state-icon">📅</div>
-                            <div class="empty-state-text">Choose a specific year to browse the best ${mediaLabel} released then.</div>
-                        </div>
-                    `;
-                    return;
-                }
-
-                // Fetch a broad candidate pool, then rank it locally into something usable.
-                const seenKeys = new Set();
-                for (let page = 1; page <= 4; page++) {
-                    let discoverUrl = `${TMDB_BASE_URL}/discover/${mediaType}?api_key=${TMDB_API_KEY}`;
-
-                    // Different date fields for movies vs TV
-                    if (mediaType === 'tv') {
-                        discoverUrl += `&first_air_date_year=${selectedYear}`;
-                        discoverUrl += yearMode === 'popular' ? `&vote_count.gte=25` : `&vote_count.gte=40`;
-                    } else {
-                        discoverUrl += `&primary_release_year=${selectedYear}`;
-                        discoverUrl += yearMode === 'popular' ? `&vote_count.gte=80` : `&vote_count.gte=120`;
-                    }
-
-                    discoverUrl += yearMode === 'popular' ? `&sort_by=popularity.desc` : `&sort_by=vote_average.desc`;
-                    discoverUrl += yearMode === 'popular' ? `&vote_average.gte=5.5` : `&vote_average.gte=6.5`;
-                    if (genreId) discoverUrl += `&with_genres=${genreId}`;
-                    discoverUrl += `&page=${page}`;
-
-                    const response = await fetch(discoverUrl);
-                    const data = await response.json();
-                    (data.results || []).forEach(item => {
-                        const key = `${mediaType}-${item.id}`;
-                        if (!seenKeys.has(key)) {
-                            seenKeys.add(key);
-                            results.push(item);
-                        }
-                    });
-
-                    if (results.length >= 80) break;
-                }
-                results = results
-                    .sort((a, b) => calculateYearRankingScore(b, mediaType, yearMode) - calculateYearRankingScore(a, mediaType, yearMode))
-                    .slice(0, 60);
-                break;
-
-            case 'top_rated':
-                // Use discover for better filtering
-                let topRatedUrl = `${TMDB_BASE_URL}/discover/${mediaType}?api_key=${TMDB_API_KEY}`;
-                topRatedUrl += `&sort_by=vote_average.desc`;
-                topRatedUrl += mediaType === 'tv' ? `&vote_count.gte=500` : `&vote_count.gte=1000`;
-                topRatedUrl += `&vote_average.gte=7.0`; // Only highly rated content
-                if (genreId) topRatedUrl += `&with_genres=${genreId}`;
-
-                const topRatedResponse = await fetch(topRatedUrl);
-                const topRatedData = await topRatedResponse.json();
-                results = topRatedData.results || [];
-                break;
-
-            case 'popular':
-            default:
-                // Use discover for consistent filtering
-                let popularUrl = `${TMDB_BASE_URL}/discover/${mediaType}?api_key=${TMDB_API_KEY}`;
-                popularUrl += `&sort_by=popularity.desc`;
-                if (genreId) popularUrl += `&with_genres=${genreId}`;
-
-                const popularResponse = await fetch(popularUrl);
-                const popularData = await popularResponse.json();
-                results = popularData.results || [];
-                break;
-        }
-
-        if (results.length > 0) {
-            renderBrowseResults(results, activeFilter === 'by_year' ? selectedYear : null, mediaType);
-        } else {
-            resultsContainer.innerHTML = `
-                <div class="empty-state">
-                    <div class="empty-state-icon">🎬</div>
-                    <div class="empty-state-text">No ${mediaLabel} found</div>
-                </div>
-            `;
-        }
-    } catch (error) {
-        console.error('Browse error:', error);
-        resultsContainer.innerHTML = `
-            <div class="empty-state">
-                <div class="empty-state-icon">❌</div>
-                <div class="empty-state-text">Error loading ${mediaLabel}. Please try again.</div>
-            </div>
-        `;
-        showToast(`Error loading ${mediaLabel}`);
-    }
-}
-
-function renderBrowseResults(results, year = null, mediaType = 'movie') {
-    // Store current state for re-rendering
-    const genreId = document.getElementById('genre-filter').value;
-    const activeFilter = document.querySelector('.filter-btn.active')?.dataset.filter || 'popular';
-    currentBrowseState = {
-        mode: 'browse',
-        results: results,
-        mediaType: mediaType,
-        query: null,
-        year: year,
-        yearMode: document.getElementById('year-mode-filter').value,
-        genreId: genreId,
-        activeFilter: activeFilter,
-        collections: [],
-        franchiseResults: [],
-        collectionId: null,
-        previousState: null
-    };
-
-    renderBrowseGrid(results, mediaType, null, year);
-}
-
-// ============= Movie Management =============
-
-async function addToWatchlist(mediaId, mediaType = 'movie') {
-    if (movies.watchlist.some(m => m.id === mediaId && (m.mediaType || 'movie') === mediaType)) {
-        showToast('Already in watchlist');
-        return false;
-    }
-
-    // Show loading state
-    showToast(`Adding to watchlist...`);
-
-    const details = await getMediaDetails(mediaId, mediaType);
-    if (!details) {
-        showToast(`Error adding ${mediaType === 'tv' ? 'show' : 'movie'}`);
-        return false;
-    }
-
-    const item = {
-        id: details.id,
-        mediaType: mediaType,
-        title: details.title || details.name,
-        poster_path: details.poster_path,
-        backdrop_path: details.backdrop_path,
-        release_date: details.release_date || details.first_air_date,
-        overview: details.overview,
-        genres: details.genres,
-        runtime: details.runtime || details.episode_run_time?.[0],
-        vote_average: details.vote_average,
-        tagline: details.tagline,
-        cast: details.credits?.cast?.slice(0, 10) || [],
-        crew: details.credits?.crew?.filter(c => c.job === 'Director' || c.job === 'Writer' || c.job === 'Producer' || c.job === 'Creator').slice(0, 5) || [],
-        watchProviders: details['watch/providers']?.results?.US,
-        externalIds: details.external_ids,
-        addedDate: new Date().toISOString()
-    };
-
-    movies.watchlist.push(item);
-    saveMoviesToStorage();
-    updateCounts();
-    showToast(`Added "${item.title}" to watchlist`);
-
-    // Refresh the current view to update button states
-    refreshCurrentView();
-    return true;
-}
-
-async function addToWatched(mediaId, mediaType = 'movie') {
-    if (movies.watched.some(m => m.id === mediaId && (m.mediaType || 'movie') === mediaType)) {
-        showToast('Already in watched list');
-        return false;
-    }
-
-    // Show loading state
-    showToast(`Adding to watched list...`);
-
-    const details = await getMediaDetails(mediaId, mediaType);
-    if (!details) {
-        showToast(`Error adding ${mediaType === 'tv' ? 'show' : 'movie'}`);
-        return false;
-    }
-
-    const item = {
-        id: details.id,
-        mediaType: mediaType,
-        title: details.title || details.name,
-        poster_path: details.poster_path,
-        backdrop_path: details.backdrop_path,
-        release_date: details.release_date || details.first_air_date,
-        overview: details.overview,
-        genres: details.genres,
-        runtime: details.runtime || details.episode_run_time?.[0],
-        vote_average: details.vote_average,
-        tagline: details.tagline,
-        cast: details.credits?.cast?.slice(0, 10) || [],
-        crew: details.credits?.crew?.filter(c => c.job === 'Director' || c.job === 'Writer' || c.job === 'Producer' || c.job === 'Creator').slice(0, 5) || [],
-        watchProviders: details['watch/providers']?.results?.US,
-        externalIds: details.external_ids,
-        watchedDate: new Date().toISOString(),
-        rating: 0,
-        review: ''
-    };
-
-    const watchlistIndex = movies.watchlist.findIndex(m => m.id === mediaId && (m.mediaType || 'movie') === mediaType);
-    if (watchlistIndex !== -1) {
-        movies.watchlist.splice(watchlistIndex, 1);
-    }
-
-    movies.watched.push(item);
-    saveMoviesToStorage();
-    updateCounts();
-    updateStats();
-    showToast(`Marked "${item.title}" as watched`);
-
-    // Refresh the current view to update button states
-    refreshCurrentView();
-    return true;
-}
-
-function moveToWatched(movieId, mediaType = 'movie') {
-    // Use fallback comparison to handle items without mediaType
-    const movie = movies.watchlist.find(m => m.id === movieId && (m.mediaType || 'movie') === mediaType);
-    if (!movie) {
-        console.log('Movie not found in watchlist:', movieId, mediaType);
-        return false;
-    }
-
-    if (movies.watched.some(m => m.id === movieId && (m.mediaType || 'movie') === mediaType)) {
-        showToast('Already in watched list');
-        return false;
-    }
-
-    movies.watchlist = movies.watchlist.filter(m => !(m.id === movieId && (m.mediaType || 'movie') === mediaType));
-    movie.watchedDate = new Date().toISOString();
-    movie.rating = 0;
-    movie.review = '';
-    movies.watched.push(movie);
-
-    saveMoviesToStorage();
-    updateCounts();
-    updateStats();
-    refreshCurrentView();
-    showToast(`Marked "${movie.title}" as watched`);
-    return true;
-}
-
-function moveToWatchlist(movieId, mediaType = 'movie') {
-    // Move item from watched back to watchlist
-    const movie = movies.watched.find(m => m.id === movieId && (m.mediaType || 'movie') === mediaType);
-    if (!movie) {
-        console.log('Movie not found in watched:', movieId, mediaType);
-        return false;
-    }
-
-    if (movies.watchlist.some(m => m.id === movieId && (m.mediaType || 'movie') === mediaType)) {
-        showToast('Already in watchlist');
-        return false;
-    }
-
-    movies.watched = movies.watched.filter(m => !(m.id === movieId && (m.mediaType || 'movie') === mediaType));
-
-    // Remove watched-specific properties
-    delete movie.watchedDate;
-    delete movie.rating;
-    delete movie.review;
-
-    // Add watchlist property
-    movie.addedDate = new Date().toISOString();
-    movies.watchlist.push(movie);
-
-    saveMoviesToStorage();
-    updateCounts();
-    updateStats();
-    refreshCurrentView();
-    showToast(`Moved "${movie.title}" back to watchlist`);
-    return true;
-}
-
-function removeFromWatchlist(movieId, mediaType = 'movie') {
-    const movie = movies.watchlist.find(m => m.id === movieId && (m.mediaType || 'movie') === mediaType);
-    if (!movie) return false;
-
-    // Confirm before removing
-    if (!confirm(`Remove "${movie.title}" from watchlist?`)) {
-        return false;
-    }
-
-    movies.watchlist = movies.watchlist.filter(m => !(m.id === movieId && (m.mediaType || 'movie') === mediaType));
-    saveMoviesToStorage();
-    updateCounts();
-    refreshCurrentView();
-    showToast(`Removed "${movie.title}" from watchlist`);
-    return true;
-}
-
-function removeFromWatched(movieId, mediaType = 'movie') {
-    const movie = movies.watched.find(m => m.id === movieId && (m.mediaType || 'movie') === mediaType);
-    if (!movie) return false;
-
-    // Confirm before removing
-    if (!confirm(`Remove "${movie.title}" from watched list? This will also delete your rating.`)) {
-        return false;
-    }
-
-    movies.watched = movies.watched.filter(m => !(m.id === movieId && (m.mediaType || 'movie') === mediaType));
-    saveMoviesToStorage();
-    updateCounts();
-    updateStats();
-    refreshCurrentView();
-    showToast(`Removed "${movie.title}" from watched list`);
-    return true;
-}
-
-function rateMovie(movieId, rating, mediaType = 'movie') {
-    const movie = movies.watched.find(m => m.id === movieId && (m.mediaType || 'movie') === mediaType);
-    if (!movie) return;
-
-    movie.rating = rating;
-    saveMoviesToStorage();
-    updateStats();
-    showToast(`Rated "${movie.title}" ${rating}/10`);
-
-    // Update the modal display to show the new rating immediately
-    const modalRating = document.getElementById('modal-rating');
-    if (modalRating) {
-        // Update star display in modal
-        modalRating.innerHTML = [1,2,3,4,5,6,7,8,9,10].map(i =>
-            `<span class="star ${i <= rating ? 'active' : ''}" onclick="rateMovie(${movieId}, ${i}, '${mediaType}')">★</span>`
-        ).join('');
-
-        // Update rating text
-        const ratingText = modalRating.parentElement.querySelector('.rating-text');
-        if (ratingText) {
-            ratingText.textContent = `${rating}/10`;
-        }
-    }
-
-    // Refresh the watched list if we're on that view
-    const activeView = document.querySelector('.nav-btn.active')?.dataset.view;
-    if (activeView === 'watched') {
-        renderWatched();
-    }
-}
-
-// ============= Rendering Functions =============
-
-function renderWatchlist() {
-    const container = document.getElementById('watchlist-grid');
-    const sortBy = document.getElementById('watchlist-sort').value;
-    const typeFilter = document.getElementById('watchlist-type-filter').value;
-    const genreFilter = document.getElementById('watchlist-genre-filter').value;
-    const searchQuery = document.getElementById('watchlist-search').value.trim().toLowerCase();
-    const clearBtn = document.getElementById('clear-watchlist-btn');
-
-    // Populate genre filter dropdown based on items in watchlist
-    populateGenreFilter('watchlist-genre-filter', movies.watchlist);
-
-    if (movies.watchlist.length === 0) {
-        clearBtn.style.display = 'none';
-        container.innerHTML = `
-            <div class="empty-state">
-                <div class="empty-state-icon">📝</div>
-                <div class="empty-state-text">Your watchlist is empty. Search for movies to add!</div>
-            </div>
-        `;
-        return;
-    }
-
-    // Show clear button when there are items
-    clearBtn.style.display = 'block';
-
-    // Apply filters
-    let filtered = [...movies.watchlist];
-
-    // Search filter
-    if (searchQuery) {
-        filtered = filtered.filter(m => {
-            const title = (m.title || '').toLowerCase();
-            const director = getDirector(m).toLowerCase();
-            const cast = (m.cast || []).map(c => c.name.toLowerCase()).join(' ');
-            const genres = (m.genres || []).map(g => g.name.toLowerCase()).join(' ');
-            return title.includes(searchQuery) ||
-                   director.includes(searchQuery) ||
-                   cast.includes(searchQuery) ||
-                   genres.includes(searchQuery);
-        });
-    }
-
-    // Type filter
-    if (typeFilter !== 'all') {
-        filtered = filtered.filter(m => m.mediaType === typeFilter);
-    }
-
-    // Genre filter
-    if (genreFilter) {
-        filtered = filtered.filter(m =>
-            m.genres && m.genres.some(g => g.id.toString() === genreFilter)
-        );
-    }
-
-    // Sort movies
-    const sorted = filtered.sort((a, b) => {
-        switch(sortBy) {
-            case 'title':
-                return a.title.localeCompare(b.title);
-            case 'year':
-                return (b.release_date || '').localeCompare(a.release_date || '');
-            case 'director':
-                const directorA = getDirector(a);
-                const directorB = getDirector(b);
-                return directorA.localeCompare(directorB);
-            case 'added':
-            default:
-                return new Date(b.addedDate) - new Date(a.addedDate);
-        }
-    });
-
-    if (sorted.length === 0) {
-        container.innerHTML = `
-            <div class="empty-state">
-                <div class="empty-state-icon">🔍</div>
-                <div class="empty-state-text">No items match your filters</div>
-            </div>
-        `;
-        return;
-    }
-
-    container.innerHTML = '';
-    sorted.forEach(movie => {
-        const card = createMovieCard(movie, 'watchlist');
-        container.appendChild(card);
-    });
-}
-
-// Helper function to get director name from crew
-function getDirector(movie) {
-    if (!movie.crew || movie.crew.length === 0) return 'Unknown';
-    const director = movie.crew.find(c => c.job === 'Director');
-    return director ? director.name : 'Unknown';
-}
-
-// Helper function to populate genre filter dropdown based on items in a list
-function populateGenreFilter(selectId, items) {
-    const select = document.getElementById(selectId);
-    const currentValue = select.value;
-
-    // Collect all unique genres from the items
-    const genreMap = new Map();
-    items.forEach(item => {
-        if (item.genres) {
-            item.genres.forEach(genre => {
-                if (!genreMap.has(genre.id)) {
-                    genreMap.set(genre.id, genre.name);
-                }
-            });
-        }
-    });
-
-    // Sort genres alphabetically
-    const sortedGenres = [...genreMap.entries()].sort((a, b) => a[1].localeCompare(b[1]));
-
-    // Clear existing options except first one
-    while (select.options.length > 1) {
-        select.remove(1);
-    }
-
-    // Add genre options
-    sortedGenres.forEach(([id, name]) => {
-        const option = document.createElement('option');
-        option.value = id;
-        option.textContent = name;
-        select.appendChild(option);
-    });
-
-    // Restore previously selected value if it still exists
-    if (currentValue && genreMap.has(parseInt(currentValue))) {
-        select.value = currentValue;
-    }
-}
-
-function clearWatchlist() {
-    if (movies.watchlist.length === 0) return;
-
-    // Confirm before clearing
-    if (!confirm(`Clear all ${movies.watchlist.length} items from your watchlist?`)) {
-        return;
-    }
-
-    movies.watchlist = [];
-    saveMoviesToStorage();
-    updateCounts();
-    renderWatchlist();
-    showToast('Watchlist cleared');
-}
-
-function renderWatched() {
-    const container = document.getElementById('watched-grid');
-    const sortBy = document.getElementById('watched-sort').value;
-    const typeFilter = document.getElementById('watched-type-filter').value;
-    const genreFilter = document.getElementById('watched-genre-filter').value;
-    const ratingFilter = document.getElementById('watched-rating-filter').value;
-    const searchQuery = document.getElementById('watched-search').value.trim().toLowerCase();
-
-    // Populate genre filter dropdown based on items in watched list
-    populateGenreFilter('watched-genre-filter', movies.watched);
-
-    if (movies.watched.length === 0) {
-        container.innerHTML = `
-            <div class="empty-state">
-                <div class="empty-state-icon">🎬</div>
-                <div class="empty-state-text">No watched items yet. Start tracking your journey!</div>
-            </div>
-        `;
-        return;
-    }
-
-    // Apply filters
-    let filtered = [...movies.watched];
-
-    // Search filter
-    if (searchQuery) {
-        filtered = filtered.filter(m => {
-            const title = (m.title || '').toLowerCase();
-            const director = getDirector(m).toLowerCase();
-            const cast = (m.cast || []).map(c => c.name.toLowerCase()).join(' ');
-            const genres = (m.genres || []).map(g => g.name.toLowerCase()).join(' ');
-            return title.includes(searchQuery) ||
-                   director.includes(searchQuery) ||
-                   cast.includes(searchQuery) ||
-                   genres.includes(searchQuery);
-        });
-    }
-
-    // Type filter
-    if (typeFilter !== 'all') {
-        filtered = filtered.filter(m => m.mediaType === typeFilter);
-    }
-
-    // Genre filter
-    if (genreFilter) {
-        filtered = filtered.filter(m =>
-            m.genres && m.genres.some(g => g.id.toString() === genreFilter)
-        );
-    }
-
-    // Rating filter
-    if (ratingFilter) {
-        if (ratingFilter === 'unrated') {
-            filtered = filtered.filter(m => !m.rating || m.rating === 0);
-        } else {
-            const minRating = parseInt(ratingFilter);
-            filtered = filtered.filter(m => m.rating && m.rating >= minRating);
-        }
-    }
-
-    // Sort movies
-    const sorted = filtered.sort((a, b) => {
-        switch(sortBy) {
-            case 'rating':
-                return (b.rating || 0) - (a.rating || 0);
-            case 'title':
-                return a.title.localeCompare(b.title);
-            case 'year':
-                return (b.release_date || '').localeCompare(a.release_date || '');
-            case 'director':
-                const directorA = getDirector(a);
-                const directorB = getDirector(b);
-                return directorA.localeCompare(directorB);
-            case 'date':
-            default:
-                return new Date(b.watchedDate) - new Date(a.watchedDate);
-        }
-    });
-
-    if (sorted.length === 0) {
-        container.innerHTML = `
-            <div class="empty-state">
-                <div class="empty-state-icon">🔍</div>
-                <div class="empty-state-text">No items match your filters</div>
-            </div>
-        `;
-        return;
-    }
-
-    container.innerHTML = '';
-    sorted.forEach(movie => {
-        const card = createMovieCard(movie, 'watched');
-        container.appendChild(card);
-    });
-}
-
-function createMovieCard(movie, listType) {
-    const card = document.createElement('div');
-    card.className = 'movie-card';
-
-    const year = movie.release_date ? movie.release_date.split('-')[0] : 'N/A';
-    const mediaType = movie.mediaType || 'movie';
-    const mediaLabel = mediaType === 'tv' ? 'TV' : '';
-
-    card.innerHTML = `
-        <img
-            src="${movie.poster_path ? TMDB_IMAGE_BASE + movie.poster_path : 'https://via.placeholder.com/500x750?text=No+Poster'}"
-            alt="${movie.title}"
-            class="movie-poster"
-        />
-        <div class="movie-info">
-            <div class="movie-title" title="${movie.title}">${movie.title}</div>
-            <div class="movie-year">${year} ${mediaLabel}</div>
-
-            ${listType === 'watched' ? `
-                <div class="rating-display">
-                    ${createStarDisplay(movie.rating || 0)}
-                    <span style="font-size: 13px; color: var(--text-secondary);">
-                        ${movie.rating ? movie.rating.toFixed(1) : 'Not rated'}
-                    </span>
-                </div>
-            ` : ''}
-
-            <div class="movie-actions">
-                ${listType === 'watchlist' ? `
-                    <button class="btn btn-secondary btn-small" onclick="event.stopPropagation(); moveToWatched(${movie.id}, '${mediaType}')">✓ Watched</button>
-                    <button class="btn btn-danger btn-small" onclick="event.stopPropagation(); removeFromWatchlist(${movie.id}, '${mediaType}')">Remove</button>
-                ` : `
-                    <button class="btn btn-primary btn-small" onclick="event.stopPropagation(); openRatingModal(${movie.id}, '${mediaType}')">Rate</button>
-                    <button class="btn btn-secondary btn-small" onclick="event.stopPropagation(); moveToWatchlist(${movie.id}, '${mediaType}')">→ Watchlist</button>
-                    <button class="btn btn-danger btn-small" onclick="event.stopPropagation(); removeFromWatched(${movie.id}, '${mediaType}')">Remove</button>
-                `}
-            </div>
-        </div>
-    `;
-
-    card.querySelector('.movie-poster').addEventListener('click', () => showMediaDetail(movie.id, listType, mediaType));
-    return card;
-}
-
-function createStarDisplay(rating) {
-    const fullStars = Math.floor(rating / 2);
-    const halfStar = rating % 2 >= 1;
-    let html = '';
-
-    for (let i = 0; i < 5; i++) {
-        if (i < fullStars) {
-            html += '<span class="star active">★</span>';
-        } else if (i === fullStars && halfStar) {
-            html += '<span class="star active">★</span>';
-        } else {
-            html += '<span class="star">☆</span>';
-        }
-    }
-
-    return html;
-}
-
-// ============= Movie Detail Modal =============
-
-function showMediaDetail(mediaId, listType = null, mediaType = 'movie') {
-    let item;
-
-    if (listType === 'watchlist') {
-        item = movies.watchlist.find(m => m.id === mediaId && (m.mediaType || 'movie') === mediaType);
-    } else if (listType === 'watched') {
-        item = movies.watched.find(m => m.id === mediaId && (m.mediaType || 'movie') === mediaType);
-    }
-
-    // If item not in lists, fetch from API
-    if (!item) {
-        getMediaDetails(mediaId, mediaType).then(details => {
-            if (details) {
-                // Add mediaType to the details object
-                details.mediaType = mediaType;
-                displayMovieModal(details, listType);
-            }
-        });
-        return;
-    }
-
-    displayMovieModal(item, listType);
-}
-
-// Keep old function for backwards compatibility
-function showMovieDetail(movieId, listType = null) {
-    showMediaDetail(movieId, listType, 'movie');
-}
-
-function displayMovieModal(movie, listType) {
-    const modalBody = document.getElementById('modal-body');
-    const mediaType = movie.mediaType || 'movie';
-    const title = movie.title || movie.name;
-    const year = (movie.release_date || movie.first_air_date) ? (movie.release_date || movie.first_air_date).split('-')[0] : 'N/A';
-    const runtime = movie.runtime ? `${movie.runtime} min` : 'N/A';
-
-    // Determine current status
-    const isInWatchlist = movies.watchlist.some(m => m.id === movie.id && (m.mediaType || 'movie') === mediaType);
-    const isWatched = movies.watched.some(m => m.id === movie.id && (m.mediaType || 'movie') === mediaType);
-
-    // Build external links
-    const tmdbLink = `https://www.themoviedb.org/${mediaType}/${movie.id}`;
-    const imdbLink = movie.externalIds?.imdb_id ? `https://www.imdb.com/title/${movie.externalIds.imdb_id}` : null;
-
-    // Build streaming providers HTML
-    let streamingHTML = '';
-    if (movie.watchProviders) {
-        const providers = [];
-        if (movie.watchProviders.flatrate) providers.push(...movie.watchProviders.flatrate);
-        if (movie.watchProviders.buy) providers.push(...movie.watchProviders.buy);
-        if (movie.watchProviders.rent) providers.push(...movie.watchProviders.rent);
-
-        // Remove duplicates
-        const uniqueProviders = [...new Map(providers.map(p => [p.provider_id, p])).values()];
-
-        if (uniqueProviders.length > 0) {
-            streamingHTML = `
-                <div class="modal-section">
-                    <strong>Where to Watch (US):</strong>
-                    <div class="streaming-providers">
-                        ${uniqueProviders.map(provider => `
-                            <div class="provider-item" title="${provider.provider_name}">
-                                <img
-                                    src="${TMDB_IMAGE_BASE.replace('w500', 'w92')}${provider.logo_path}"
-                                    alt="${provider.provider_name}"
-                                    class="provider-logo"
-                                />
-                            </div>
-                        `).join('')}
-                    </div>
-                </div>
-            `;
-        }
-    }
-
-    modalBody.innerHTML = `
-        <div class="modal-header">
-            <img
-                src="${movie.poster_path ? TMDB_IMAGE_BASE + movie.poster_path : 'https://via.placeholder.com/500x750?text=No+Poster'}"
-                alt="${title}"
-                class="modal-poster"
-            />
-            <div class="modal-info">
-                <h2 class="modal-title">${title}</h2>
-                <div class="modal-meta">
-                    ${year} • ${runtime} ${movie.vote_average ? `• ⭐ ${movie.vote_average.toFixed(1)}/10 TMDB` : ''}
-                </div>
-
-                <div class="external-links">
-                    <a href="${tmdbLink}" target="_blank" class="external-link" title="View on TMDB">
-                        🎬 TMDB
-                    </a>
-                    ${imdbLink ? `
-                        <a href="${imdbLink}" target="_blank" class="external-link" title="View on IMDb">
-                            ⭐ IMDb
-                        </a>
-                    ` : ''}
-                </div>
-
-                ${movie.genres && movie.genres.length > 0 ? `
-                    <div class="modal-genres">
-                        ${movie.genres.map(g => `<span class="genre-tag">${g.name}</span>`).join('')}
-                    </div>
-                ` : ''}
-
-                <div class="modal-actions" style="margin-top: 15px; display: flex; gap: 10px; flex-wrap: wrap;">
-                    ${!isInWatchlist && !isWatched ?
-                        `<button class="btn btn-primary" onclick="handleModalAction(() => addToWatchlist(${movie.id}, '${mediaType}'))">+ Add to Watchlist</button>` :
-                        ''}
-                    ${isInWatchlist ?
-                        `<button class="btn btn-danger" onclick="handleModalAction(() => removeFromWatchlist(${movie.id}, '${mediaType}'))">− Remove from Watchlist</button>` :
-                        ''}
-                    ${!isWatched ?
-                        `<button class="btn btn-secondary" onclick="handleModalAction(() => addToWatched(${movie.id}, '${mediaType}'))">✓ Mark as Watched</button>` :
-                        `<button class="btn btn-danger" onclick="handleModalAction(() => removeFromWatched(${movie.id}, '${mediaType}'))">✗ Remove from Watched</button>`}
-                </div>
-
-                ${isWatched ? `
-                    <div style="margin-top: 15px;">
-                        <strong>Your Rating:</strong>
-                        <div class="star-rating" id="modal-rating">
-                            ${[1,2,3,4,5,6,7,8,9,10].map(i =>
-                                `<span class="star ${i <= (movie.rating || 0) ? 'active' : ''}" onclick="rateMovie(${movie.id}, ${i}, '${mediaType}')">★</span>`
-                            ).join('')}
-                        </div>
-                        <div class="rating-text" style="margin-top: 5px; font-size: 14px; color: var(--text-secondary);">
-                            ${movie.rating ? `${movie.rating}/10` : 'Not rated yet'}
-                        </div>
-                    </div>
-                ` : ''}
-            </div>
-        </div>
-
-        ${movie.tagline ? `
-            <div class="modal-tagline">
-                <em>"${movie.tagline}"</em>
-            </div>
-        ` : ''}
-
-        <div class="modal-overview">
-            <strong>Overview:</strong><br>
-            ${movie.overview || 'No overview available.'}
-        </div>
-
-        ${streamingHTML}
-
-        ${movie.crew && movie.crew.length > 0 ? `
-            <div class="modal-section">
-                <strong>Crew:</strong>
-                <div class="crew-list">
-                    ${movie.crew.map(person => `
-                        <div class="crew-item">
-                            <span class="crew-name">${person.name}</span>
-                            <span class="crew-role">${person.job}</span>
-                        </div>
-                    `).join('')}
-                </div>
-            </div>
-        ` : ''}
-
-        ${movie.cast && movie.cast.length > 0 ? `
-            <div class="modal-section">
-                <strong>Cast:</strong>
-                <div class="cast-list">
-                    ${movie.cast.map(actor => `
-                        <div class="cast-item">
-                            ${actor.profile_path ? `
-                                <img
-                                    src="${TMDB_IMAGE_BASE.replace('w500', 'w185')}${actor.profile_path}"
-                                    alt="${actor.name}"
-                                    class="cast-photo"
-                                />
-                            ` : `<div class="cast-photo-placeholder">👤</div>`}
-                            <div class="cast-info">
-                                <div class="cast-name">${actor.name}</div>
-                                <div class="cast-character">${actor.character || 'Unknown'}</div>
-                            </div>
-                        </div>
-                    `).join('')}
-                </div>
-            </div>
-        ` : ''}
-    `;
-
-    const modal = document.getElementById('movie-modal');
-    modal.classList.add('active');
-
-    // Prevent body scroll when modal is open
-    document.body.style.overflow = 'hidden';
-}
-
-async function handleModalAction(action) {
-    const result = await action();
-    if (result) {
-        closeModal();
-    }
-}
-
-function openRatingModal(movieId, mediaType = 'movie') {
-    showMediaDetail(movieId, 'watched', mediaType);
-}
-
-function closeModal() {
-    document.getElementById('movie-modal').classList.remove('active');
-
-    // Restore body scroll
-    document.body.style.overflow = '';
-
-    // Refresh the current view to show updated ratings
-    const activeView = document.querySelector('.nav-btn.active').dataset.view;
-    if (activeView === 'watched') renderWatched();
-}
-
-// ============= Recommendations =============
-
-let cachedRecommendations = [];
-
-async function loadRecommendations() {
-    const container = document.getElementById('recommendations-grid');
-    const description = document.getElementById('rec-description');
-
-    // Need watched items to make recommendations
-    if (movies.watched.length === 0 && movies.watchlist.length === 0) {
-        description.textContent = '';
-        container.innerHTML = `
-            <div class="empty-state">
-                <div class="empty-state-icon">🎯</div>
-                <div class="empty-state-text">Add movies and TV shows to your watched list to get personalized recommendations!</div>
-            </div>
-        `;
-        return;
-    }
-
-    container.innerHTML = `<div class="loading"><div class="spinner"></div>Finding recommendations for you...</div>`;
-
-    try {
-        // 1. Analyze user's preferences
-        const topRated = [...movies.watched]
-            .filter(m => m.rating && m.rating >= 7)
-            .sort((a, b) => b.rating - a.rating)
-            .slice(0, 10);
-
-        const recentWatched = [...movies.watched]
-            .sort((a, b) => new Date(b.watchedDate) - new Date(a.watchedDate))
-            .slice(0, 5);
-
-        // Combine top rated + recent, deduplicate
-        const seedItems = [];
-        const seenSeedIds = new Set();
-        [...topRated, ...recentWatched].forEach(item => {
-            const key = `${item.mediaType}-${item.id}`;
-            if (!seenSeedIds.has(key)) {
-                seenSeedIds.add(key);
-                seedItems.push(item);
-            }
-        });
-
-        // If no rated items, use watchlist + whatever is in watched
-        if (seedItems.length === 0) {
-            const fallback = [...movies.watched, ...movies.watchlist].slice(0, 6);
-            fallback.forEach(item => {
-                const key = `${item.mediaType}-${item.id}`;
-                if (!seenSeedIds.has(key)) {
-                    seenSeedIds.add(key);
-                    seedItems.push(item);
-                }
-            });
-        }
-
-        // 2. Get user's favorite genres (weighted by rating)
-        const genreScores = {};
-        const genreNames = {};
-        movies.watched.forEach(m => {
-            if (m.genres) {
-                const weight = m.rating ? m.rating / 10 : 0.5;
-                m.genres.forEach(g => {
-                    genreScores[g.id] = (genreScores[g.id] || 0) + weight;
-                    genreNames[g.id] = g.name;
-                });
-            }
-        });
-        const topGenres = Object.entries(genreScores)
-            .sort((a, b) => b[1] - a[1])
-            .slice(0, 5);
-        const topGenreIds = topGenres.map(([id]) => id);
-
-        // 3. Get user's favorite directors
-        const directorScores = {};
-        movies.watched.forEach(m => {
-            if (m.crew) {
-                const director = m.crew.find(c => c.job === 'Director');
-                if (director) {
-                    const weight = m.rating ? m.rating / 10 : 0.5;
-                    directorScores[director.id] = directorScores[director.id] || { name: director.name, score: 0, id: director.id };
-                    directorScores[director.id].score += weight;
-                }
-            }
-        });
-        const topDirectors = Object.values(directorScores)
-            .sort((a, b) => b.score - a.score)
-            .slice(0, 3);
-
-        // 4. Build all existing IDs to exclude (watchlist + watched)
-        const existingIds = new Set();
-        movies.watchlist.forEach(m => existingIds.add(`${m.mediaType || 'movie'}-${m.id}`));
-        movies.watched.forEach(m => existingIds.add(`${m.mediaType || 'movie'}-${m.id}`));
-
-        // 5. Fetch recommendations from TMDB for seed items
-        const recPromises = seedItems.slice(0, 8).map(item => {
-            const mt = item.mediaType || 'movie';
-            return fetch(`${TMDB_BASE_URL}/${mt}/${item.id}/recommendations?api_key=${TMDB_API_KEY}&page=1`)
-                .then(r => r.json())
-                .then(data => (data.results || []).map(r => ({ ...r, mediaType: mt, source: item.title, section: 'pick' })))
-                .catch(() => []);
-        });
-
-        // 6. Also fetch "similar" for top 5 highest rated
-        const simPromises = seedItems.slice(0, 5).map(item => {
-            const mt = item.mediaType || 'movie';
-            return fetch(`${TMDB_BASE_URL}/${mt}/${item.id}/similar?api_key=${TMDB_API_KEY}&page=1`)
-                .then(r => r.json())
-                .then(data => (data.results || []).map(r => ({ ...r, mediaType: mt, source: item.title, section: 'similar' })))
-                .catch(() => []);
-        });
-
-        // 7. Fetch discover for EACH top genre individually (for genre sections)
-        const genreDiscoverPromises = topGenres.slice(0, 4).map(([genreId]) => {
-            return Promise.all([
-                fetch(`${TMDB_BASE_URL}/discover/movie?api_key=${TMDB_API_KEY}&sort_by=vote_average.desc&vote_count.gte=500&vote_average.gte=7.0&with_genres=${genreId}&page=1`)
-                    .then(r => r.json())
-                    .then(data => (data.results || []).map(r => ({ ...r, mediaType: 'movie', source: genreNames[genreId], section: 'genre', genreId: genreId, genreName: genreNames[genreId] })))
-                    .catch(() => []),
-                fetch(`${TMDB_BASE_URL}/discover/tv?api_key=${TMDB_API_KEY}&sort_by=vote_average.desc&vote_count.gte=200&vote_average.gte=7.5&with_genres=${genreId}&page=1`)
-                    .then(r => r.json())
-                    .then(data => (data.results || []).map(r => ({ ...r, mediaType: 'tv', source: genreNames[genreId], section: 'genre', genreId: genreId, genreName: genreNames[genreId] })))
-                    .catch(() => [])
-            ]).then(([movies, tv]) => [...movies, ...tv]);
-        });
-
-        // 8. Fetch trending using both daily and weekly TMDB signals
-        const trendingPromise = Promise.all([
-            fetchTrendingResults('movie', { pageLimit: 2 })
-                .then(items => items.map(item => ({ ...item, source: 'Trending', section: 'trending' })))
-                .catch(() => []),
-            fetchTrendingResults('tv', { pageLimit: 2 })
-                .then(items => items.map(item => ({ ...item, source: 'Trending', section: 'trending' })))
-                .catch(() => [])
-        ]).then(([movies, tv]) => [...movies, ...tv]);
-
-        // 9. Fetch movies by favorite directors
-        const directorPromises = topDirectors.map(dir =>
-            fetch(`${TMDB_BASE_URL}/discover/movie?api_key=${TMDB_API_KEY}&sort_by=vote_average.desc&vote_count.gte=50&with_crew=${dir.id}&page=1`)
-                .then(r => r.json())
-                .then(data => (data.results || []).map(r => ({ ...r, mediaType: 'movie', source: dir.name, section: 'director', directorName: dir.name })))
-                .catch(() => [])
-        );
-
-        // 10. Fetch all in parallel
-        const [recResults, simResults, genreResults, trendingResults, directorResults] = await Promise.all([
-            Promise.all(recPromises),
-            Promise.all(simPromises),
-            Promise.all(genreDiscoverPromises),
-            trendingPromise,
-            Promise.all(directorPromises)
-        ]);
-
-        // 11. Merge, deduplicate, and exclude already seen
-        const allRecs = [];
-        const seenRecIds = new Set();
-
-        const addRecs = (items, priority) => {
-            const batch = Array.isArray(items[0]) ? items : [items];
-            batch.forEach(group => {
-                (Array.isArray(group) ? group : [group]).forEach(item => {
-                    const mt = item.mediaType || 'movie';
-                    const key = `${mt}-${item.id}`;
-                    if (!seenRecIds.has(key) && !existingIds.has(key)) {
-                        seenRecIds.add(key);
-                        allRecs.push({ ...item, priority });
-                    }
-                });
-            });
-        };
-
-        // Recommendations from top rated get highest priority
-        addRecs(recResults, 4);
-        // Similar movies get high priority
-        addRecs(simResults, 3);
-        // Director-based
-        addRecs(directorResults, 2);
-        // Genre-based discover
-        addRecs(genreResults, 2);
-        // Trending gets lower priority
-        addRecs([trendingResults], 1);
-
-        // 12. Sort: priority first, then by trending score or vote average
-        allRecs.sort((a, b) => {
-            if (b.priority !== a.priority) return b.priority - a.priority;
-            if ((b.trendingScore || 0) !== (a.trendingScore || 0)) {
-                return (b.trendingScore || 0) - (a.trendingScore || 0);
-            }
-            return (b.vote_average || 0) - (a.vote_average || 0);
-        });
-
-        // Cache for re-rendering without API calls
-        cachedRecommendations = allRecs;
-
-        // 13. Build description
-        const seedTitles = seedItems.slice(0, 3).map(s => s.title).join(', ');
-        description.textContent = `Based on ${seedTitles}${seedItems.length > 3 ? ` and ${seedItems.length - 3} more` : ''} from your collection`;
-
-        renderRecommendationsGrid();
-
-    } catch (error) {
-        console.error('Recommendations error:', error);
-        container.innerHTML = `
-            <div class="empty-state">
-                <div class="empty-state-icon">❌</div>
-                <div class="empty-state-text">Error loading recommendations. Try again.</div>
-            </div>
-        `;
-    }
-}
-
-function renderRecommendationsGrid() {
-    const container = document.getElementById('recommendations-grid');
-    const typeFilter = document.getElementById('rec-type-filter').value;
-
-    let recs = [...cachedRecommendations];
-
-    // Re-check existing IDs (in case user added something since loading)
-    const existingIds = new Set();
-    movies.watchlist.forEach(m => existingIds.add(`${m.mediaType || 'movie'}-${m.id}`));
-    movies.watched.forEach(m => existingIds.add(`${m.mediaType || 'movie'}-${m.id}`));
-    recs = recs.filter(item => !existingIds.has(`${item.mediaType}-${item.id}`));
-
-    // Type filter
-    if (typeFilter !== 'all') {
-        recs = recs.filter(r => r.mediaType === typeFilter);
-    }
-
-    // Also filter out hidden items
-    recs = recs.filter(item => !isItemHidden(item.id, item.mediaType || 'movie'));
-
-    if (recs.length === 0) {
-        container.innerHTML = `
-            <div class="empty-state">
-                <div class="empty-state-icon">🎯</div>
-                <div class="empty-state-text">No recommendations found. Rate more movies to improve suggestions!</div>
-            </div>
-        `;
-        return;
-    }
-
-    // Group into sections
-    const pickedForYou = recs.filter(r => r.section === 'pick').slice(0, 12);
-    const similarItems = recs.filter(r => r.section === 'similar').slice(0, 10);
-    const trendingItems = recs.filter(r => r.section === 'trending').slice(0, 10);
-
-    // Group genre items by genre name
-    const genreGroups = {};
-    recs.filter(r => r.section === 'genre').forEach(item => {
-        const name = item.genreName || item.source;
-        if (!genreGroups[name]) genreGroups[name] = [];
-        if (genreGroups[name].length < 8) genreGroups[name].push(item);
-    });
-
-    // Group director items by director name
-    const directorGroups = {};
-    recs.filter(r => r.section === 'director').forEach(item => {
-        const name = item.directorName || item.source;
-        if (!directorGroups[name]) directorGroups[name] = [];
-        if (directorGroups[name].length < 6) directorGroups[name].push(item);
-    });
-
-    container.innerHTML = '';
-
-    // Helper to create a section
-    const createSection = (title, subtitle, items) => {
-        if (items.length === 0) return;
-
-        const section = document.createElement('div');
-        section.style.cssText = 'margin-bottom: 35px;';
-        section.innerHTML = `
-            <h3 style="color: var(--text-primary); margin-bottom: 5px; font-size: 18px;">${title}</h3>
-            ${subtitle ? `<p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 15px;">${subtitle}</p>` : ''}
-        `;
-
-        const grid = document.createElement('div');
-        grid.className = 'movie-grid';
-
-        items.forEach(item => {
-            const mediaType = item.mediaType || 'movie';
-            const itemTitle = item.title || item.name;
-            const releaseDate = item.release_date || item.first_air_date;
-            const isInWatchlist = movies.watchlist.some(m => m.id === item.id && (m.mediaType || 'movie') === mediaType);
-            const isWatched = movies.watched.some(m => m.id === item.id && (m.mediaType || 'movie') === mediaType);
-
-            const card = document.createElement('div');
-            card.className = 'movie-card';
-            card.innerHTML = `
-                <img
-                    src="${item.poster_path ? TMDB_IMAGE_BASE + item.poster_path : 'https://via.placeholder.com/500x750?text=No+Poster'}"
-                    alt="${itemTitle}"
-                    class="movie-poster"
-                />
-                <div class="movie-info">
-                    <div class="movie-title">${itemTitle}</div>
-                    <div class="movie-year">${releaseDate ? releaseDate.split('-')[0] : 'N/A'} ${mediaType === 'tv' ? '• TV' : ''}</div>
-                    ${item.vote_average ? `<div style="margin: 5px 0; font-size: 13px; color: var(--text-secondary);">⭐ ${item.vote_average.toFixed(1)}/10</div>` : ''}
-                    ${item.source && item.section === 'pick' ? `<div style="font-size: 11px; color: var(--accent); margin-bottom: 5px;">Because you liked: ${item.source}</div>` : ''}
-                    <div class="movie-actions">
-                        ${!isInWatchlist && !isWatched ?
-                            `<button class="btn btn-primary btn-small" onclick="event.stopPropagation(); addToWatchlist(${item.id}, '${mediaType}')">+ Watchlist</button>` :
-                            ''}
-                        ${isInWatchlist ?
-                            `<button class="btn btn-danger btn-small" onclick="event.stopPropagation(); removeFromWatchlist(${item.id}, '${mediaType}')">− Watchlist</button>` :
-                            ''}
-                        ${!isWatched ?
-                            `<button class="btn btn-secondary btn-small" onclick="event.stopPropagation(); addToWatched(${item.id}, '${mediaType}')">✓ Watched</button>` :
-                            `<button class="btn btn-danger btn-small" onclick="event.stopPropagation(); removeFromWatched(${item.id}, '${mediaType}')">✗ Unwatch</button>`}
-                    </div>
-                    <button class="btn btn-small streaming-btn" onclick="event.stopPropagation(); showStreamingInfo(${item.id}, '${mediaType}')" style="margin-top: 8px; width: 100%; background: var(--bg-secondary); border: 1px solid var(--border);">
-                        📺 Where to Watch
-                    </button>
-                    <button class="btn btn-small" onclick="event.stopPropagation(); hideItem(${item.id}, '${mediaType}')" style="margin-top: 4px; width: 100%; background: transparent; border: 1px solid var(--border); color: var(--text-secondary); font-size: 11px;">
-                        🚫 Not Interested
-                    </button>
-                </div>
-            `;
-
-            card.querySelector('.movie-poster').addEventListener('click', () => showMediaDetail(item.id, null, mediaType));
-            grid.appendChild(card);
-        });
-
-        section.appendChild(grid);
-        container.appendChild(section);
-    };
-
-    // Render each section
-    createSection('Picked For You', 'Based on your highest-rated items', pickedForYou);
-    createSection('More Like Your Favorites', 'Similar to what you already love', similarItems);
-
-    // Director sections
-    Object.entries(directorGroups).forEach(([dirName, items]) => {
-        createSection(`From Director: ${dirName}`, null, items);
-    });
-
-    // Genre sections
-    Object.entries(genreGroups).forEach(([genreName, items]) => {
-        createSection(`Because You Like ${genreName}`, `Top rated ${genreName.toLowerCase()} picks`, items);
-    });
-
-    createSection('Trending This Week', 'Popular right now', trendingItems);
-}
-
-// ============= Statistics =============
-
-function updateStats() {
-    const totalMovies = movies.watchlist.length + movies.watched.length;
-    const totalWatched = movies.watched.length;
-
-    // Calculate average rating
-    const ratedMovies = movies.watched.filter(m => m.rating > 0);
-    const avgRating = ratedMovies.length > 0
-        ? (ratedMovies.reduce((sum, m) => sum + m.rating, 0) / ratedMovies.length).toFixed(1)
-        : '0';
-
-    // Calculate total hours
-    const totalMinutes = movies.watched.reduce((sum, m) => sum + (m.runtime || 0), 0);
-    const totalHours = Math.round(totalMinutes / 60);
-
-    // Update stat cards
-    document.getElementById('total-movies').textContent = totalMovies;
-    document.getElementById('total-watched').textContent = totalWatched;
-    document.getElementById('avg-rating').textContent = avgRating;
-    document.getElementById('total-hours').textContent = totalHours;
-
-    // Top rated movies
-    renderTopRated();
-
-    // Genre statistics
-    renderGenreStats();
-}
-
-function renderTopRated() {
-    const container = document.getElementById('top-rated-list');
-    const topMovies = [...movies.watched]
-        .filter(m => m.rating > 0)
-        .sort((a, b) => b.rating - a.rating)
-        .slice(0, 5);
-
-    if (topMovies.length === 0) {
-        container.innerHTML = '<div class="empty-state-text">No rated items yet</div>';
-        return;
-    }
-
-    container.innerHTML = topMovies.map(movie => `
-        <div class="top-movie-item">
-            <span class="top-movie-title">${movie.title}</span>
-            <span style="color: #fbbf24; font-weight: 600;">${movie.rating}/10 ★</span>
-        </div>
-    `).join('');
-}
-
-function renderGenreStats() {
-    const container = document.getElementById('genre-list');
-    const genreCount = {};
-
-    movies.watched.forEach(movie => {
-        if (movie.genres) {
-            movie.genres.forEach(genre => {
-                genreCount[genre.name] = (genreCount[genre.name] || 0) + 1;
-            });
-        }
-    });
-
-    if (Object.keys(genreCount).length === 0) {
-        container.innerHTML = '<div class="empty-state-text">No genre data yet</div>';
-        return;
-    }
-
-    const sortedGenres = Object.entries(genreCount)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 5);
-
-    const maxCount = sortedGenres[0][1];
-
-    container.innerHTML = sortedGenres.map(([genre, count]) => `
-        <div class="genre-item">
-            <div class="genre-item-header">
-                <strong>${genre}</strong>
-                <span>${count} ${count === 1 ? 'item' : 'items'}</span>
-            </div>
-            <div class="genre-bar">
-                <div class="genre-bar-fill" style="width: ${(count / maxCount) * 100}%"></div>
-            </div>
-        </div>
-    `).join('');
-}
-
-// ============= Local Storage =============
-
-function saveMoviesToStorage() {
-    localStorage.setItem('movieTrackerData', JSON.stringify(movies));
-}
-
-function normalizeStoredItem(item, fallbackMediaType = 'movie') {
-    if (!item || typeof item !== 'object') return null;
-
-    return {
-        ...item,
-        mediaType: item.mediaType || fallbackMediaType,
-        genres: Array.isArray(item.genres) ? item.genres : [],
-        cast: Array.isArray(item.cast) ? item.cast : [],
-        crew: Array.isArray(item.crew) ? item.crew : []
-    };
-}
-
-function loadMoviesFromStorage() {
-    const stored = localStorage.getItem('movieTrackerData');
-    if (!stored) {
-        movies = { watchlist: [], watched: [] };
-        return;
-    }
-
-    try {
-        const parsed = JSON.parse(stored);
-        const watchlist = Array.isArray(parsed?.watchlist) ? parsed.watchlist : [];
-        const watched = Array.isArray(parsed?.watched) ? parsed.watched : [];
-
-        movies = {
-            watchlist: watchlist.map(item => normalizeStoredItem(item)).filter(Boolean),
-            watched: watched.map(item => normalizeStoredItem(item)).filter(Boolean)
-        };
-
-        saveMoviesToStorage();
-    } catch (error) {
-        console.error('Error loading saved movie data:', error);
-        movies = { watchlist: [], watched: [] };
-        saveMoviesToStorage();
-        showToast('Saved movie data was corrupted and has been reset.');
-    }
-}
-
-function updateCounts() {
-    document.getElementById('watchlist-count').textContent = movies.watchlist.length;
-    document.getElementById('watched-count').textContent = movies.watched.length;
-}
-
-// ============= Theme =============
-
-function toggleTheme() {
-    const currentTheme = document.documentElement.getAttribute('data-theme');
-    const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
-
-    document.documentElement.setAttribute('data-theme', newTheme);
-    localStorage.setItem('theme', newTheme);
-
-    const icon = document.querySelector('.theme-icon');
-    icon.textContent = newTheme === 'dark' ? '☀️' : '🌙';
-}
-
-function loadTheme() {
-    const savedTheme = localStorage.getItem('theme') || 'light';
-    document.documentElement.setAttribute('data-theme', savedTheme);
-
-    const icon = document.querySelector('.theme-icon');
-    icon.textContent = savedTheme === 'dark' ? '☀️' : '🌙';
-}
-
-// ============= Collections Toggle =============
-
-function toggleCollections() {
-    const grid = document.getElementById('collections-grid');
-    const arrow = document.getElementById('collections-arrow');
-    if (!grid || !arrow) return;
-
-    const isHidden = grid.style.display === 'none';
-    grid.style.display = isHidden ? 'flex' : 'none';
-    arrow.style.transform = isHidden ? 'rotate(90deg)' : 'rotate(0deg)';
-}
-
-function toggleFranchiseResults() {
-    const grid = document.getElementById('franchise-grid');
-    const arrow = document.getElementById('franchise-arrow');
-    if (!grid || !arrow) return;
-
-    const isHidden = grid.style.display === 'none';
-    grid.style.display = isHidden ? 'flex' : 'none';
-    arrow.style.transform = isHidden ? 'rotate(90deg)' : 'rotate(0deg)';
-}
-
-// ============= Hidden Items =============
-
-function getHiddenItems() {
-    const stored = localStorage.getItem('hiddenItems');
-    if (!stored) return [];
-
-    try {
-        const parsed = JSON.parse(stored);
-        return Array.isArray(parsed) ? parsed.filter(item => typeof item === 'string') : [];
-    } catch (error) {
-        console.error('Error loading hidden items:', error);
-        saveHiddenItems([]);
-        return [];
-    }
-}
-
-function saveHiddenItems(items) {
-    localStorage.setItem('hiddenItems', JSON.stringify(items));
-}
-
-function hideItem(mediaId, mediaType = 'movie') {
-    const hidden = getHiddenItems();
-    const key = `${mediaType}-${mediaId}`;
-    if (!hidden.includes(key)) {
-        hidden.push(key);
-        saveHiddenItems(hidden);
-    }
-    showToast('Item hidden from your feed');
-    refreshCurrentView();
-}
-
-function isItemHidden(mediaId, mediaType = 'movie') {
-    const hidden = getHiddenItems();
-    return hidden.includes(`${mediaType}-${mediaId}`);
-}
-
-// ============= Toast Notifications =============
-
-function showToast(message) {
-    const toast = document.getElementById('toast');
-    toast.textContent = message;
-    toast.classList.add('show');
-
-    setTimeout(() => {
-        toast.classList.remove('show');
-    }, 3000);
+try {
+  const loaded = store.load();
+  library = store.getSnapshot();
+  reportStorageWarning(loaded.warning || "");
+  store.subscribe(updateLibrary);
+  try {
+    setTheme(storage.getItem("theme") || "dark");
+  } catch {
+    setTheme("dark");
+  }
+  const params = Object.fromEntries(new URLSearchParams(location.search));
+  try {
+    state.filters = normalizeFilters({ ...defaults, ...params });
+  } catch {
+    state.filters = { ...defaults };
+  }
+  syncFilters(state.filters);
+  $("search-input").value =
+    state.filters.mode === "search" ? state.filters.query : "";
+  updateLibrary();
+  navigate(location.hash.slice(1) || "discover");
+  runDiscovery();
+} catch (error) {
+  reportStorageWarning(
+    error.message ||
+      "The tracker could not initialize. Please reload the page.",
+  );
 }

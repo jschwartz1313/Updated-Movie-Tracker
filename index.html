@@ -1,204 +1,349 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Movie Tracker</title>
-    <link rel="stylesheet" href="style.css">
-</head>
-<body>
-    <div class="container">
-        <!-- Header -->
-        <header class="header">
-            <h1>🎬 Movie Tracker</h1>
-            <nav class="nav">
-                <button class="nav-btn active" data-view="browse">Browse</button>
-                <button class="nav-btn" data-view="watchlist">Watchlist <span class="badge" id="watchlist-count">0</span></button>
-                <button class="nav-btn" data-view="watched">Watched <span class="badge" id="watched-count">0</span></button>
-                <button class="nav-btn" data-view="recommendations">For You</button>
-                <button class="nav-btn" data-view="stats">Stats</button>
-            </nav>
-            <button class="theme-toggle" id="theme-toggle" title="Toggle dark/light mode">
-                <span class="theme-icon">🌙</span>
-            </button>
-        </header>
-
-        <!-- Browse View -->
-        <section class="view active" id="browse-view">
-            <div class="browse-container">
-                <h2>Browse & Search</h2>
-
-                <!-- Search Box -->
-                <div class="search-box" style="margin-bottom: 20px;">
-                    <input type="text" id="search-input" placeholder="Search for a movie or TV show..." />
-                    <button id="search-btn">Search</button>
-                </div>
-
-                <div class="browse-filters">
-                    <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 10px;">
-                        <button class="filter-btn active" data-filter="popular">Popular Now</button>
-                        <button class="filter-btn" data-filter="top_rated">Top Rated</button>
-                        <button class="filter-btn" data-filter="trending">Trending</button>
-                        <button class="filter-btn" data-filter="by_year">By Year</button>
-                    </div>
-                    <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
-                        <select id="media-type-filter" class="genre-filter">
-                            <option value="movie">Movies</option>
-                            <option value="tv">TV Shows</option>
-                        </select>
-                        <select id="genre-filter" class="genre-filter">
-                            <option value="">All Genres</option>
-                        </select>
-                        <select id="year-filter" class="genre-filter" style="display: none;">
-                            <option value="">Choose a year</option>
-                        </select>
-                        <select id="year-mode-filter" class="genre-filter" style="display: none;">
-                            <option value="best">Best Of Year</option>
-                            <option value="popular">Most Popular</option>
-                        </select>
-                    </div>
-                </div>
-
-                <div class="browse-results" id="browse-results"></div>
-            </div>
-        </section>
-
-        <!-- Watchlist View -->
-        <section class="view" id="watchlist-view">
-            <div class="list-container">
-                <div class="list-header">
-                    <h2>My Watchlist</h2>
-                    <div class="search-box list-search-box" style="margin: 15px 0;">
-                        <input type="text" id="watchlist-search" placeholder="Search your watchlist..." />
-                    </div>
-                    <div class="filters" style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-                        <select id="watchlist-type-filter" class="genre-filter">
-                            <option value="all">All Types</option>
-                            <option value="movie">Movies Only</option>
-                            <option value="tv">TV Shows Only</option>
-                        </select>
-                        <select id="watchlist-genre-filter" class="genre-filter">
-                            <option value="">All Genres</option>
-                        </select>
-                        <select id="watchlist-sort">
-                            <option value="added">Recently Added</option>
-                            <option value="title">Title (A-Z)</option>
-                            <option value="year">Release Year</option>
-                            <option value="director">Director (A-Z)</option>
-                        </select>
-                        <button class="btn btn-danger btn-small" id="clear-watchlist-btn" onclick="clearWatchlist()" style="display: none;">Clear All</button>
-                    </div>
-                </div>
-                <div class="movie-grid" id="watchlist-grid"></div>
-            </div>
-        </section>
-
-        <!-- Watched View -->
-        <section class="view" id="watched-view">
-            <div class="list-container">
-                <div class="list-header">
-                    <h2>Watched</h2>
-                    <div class="search-box list-search-box" style="margin: 15px 0;">
-                        <input type="text" id="watched-search" placeholder="Search your watched list..." />
-                    </div>
-                    <div class="filters" style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-                        <select id="watched-type-filter" class="genre-filter">
-                            <option value="all">All Types</option>
-                            <option value="movie">Movies Only</option>
-                            <option value="tv">TV Shows Only</option>
-                        </select>
-                        <select id="watched-genre-filter" class="genre-filter">
-                            <option value="">All Genres</option>
-                        </select>
-                        <select id="watched-rating-filter" class="genre-filter">
-                            <option value="">All Ratings</option>
-                            <option value="9">9+ Stars</option>
-                            <option value="8">8+ Stars</option>
-                            <option value="7">7+ Stars</option>
-                            <option value="6">6+ Stars</option>
-                            <option value="5">5+ Stars</option>
-                            <option value="unrated">Unrated Only</option>
-                        </select>
-                        <select id="watched-sort">
-                            <option value="rating">Highest Rated</option>
-                            <option value="date">Recently Watched</option>
-                            <option value="title">Title (A-Z)</option>
-                            <option value="year">Release Year</option>
-                            <option value="director">Director (A-Z)</option>
-                        </select>
-                    </div>
-                </div>
-                <div class="movie-grid" id="watched-grid"></div>
-            </div>
-        </section>
-
-        <!-- Recommendations View -->
-        <section class="view" id="recommendations-view">
-            <div class="list-container">
-                <div class="list-header">
-                    <h2>Recommended For You</h2>
-                    <div class="filters" style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-                        <select id="rec-type-filter" class="genre-filter">
-                            <option value="all">All Types</option>
-                            <option value="movie">Movies Only</option>
-                            <option value="tv">TV Shows Only</option>
-                        </select>
-                        <button class="btn btn-primary btn-small" id="refresh-recs-btn" onclick="loadRecommendations()">Refresh</button>
-                    </div>
-                </div>
-                <p id="rec-description" style="color: var(--text-secondary); margin-bottom: 20px;">Based on your watched list, ratings, and favorite genres</p>
-                <div class="movie-grid" id="recommendations-grid"></div>
-            </div>
-        </section>
-
-        <!-- Stats View -->
-        <section class="view" id="stats-view">
-            <div class="stats-container">
-                <h2>Statistics</h2>
-
-                <div class="stats-grid">
-                    <div class="stat-card">
-                        <div class="stat-value" id="total-movies">0</div>
-                        <div class="stat-label">Total Items</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-value" id="total-watched">0</div>
-                        <div class="stat-label">Items Watched</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-value" id="avg-rating">0</div>
-                        <div class="stat-label">Average Rating</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-value" id="total-hours">0</div>
-                        <div class="stat-label">Hours Watched</div>
-                    </div>
-                </div>
-
-                <div class="top-movies">
-                    <h3>Top Rated</h3>
-                    <div id="top-rated-list"></div>
-                </div>
-
-                <div class="genre-stats">
-                    <h3>Favorite Genres</h3>
-                    <div id="genre-list"></div>
-                </div>
-            </div>
-        </section>
-    </div>
-
-    <!-- Movie Detail Modal -->
-    <div class="modal" id="movie-modal">
-        <div class="modal-content">
-            <button class="modal-close" id="modal-close">&times;</button>
-            <div class="modal-body" id="modal-body"></div>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta
+      name="description"
+      content="Find your next great movie. Explore by genre, year and rating, and keep a personal watchlist and viewing journal."
+    />
+    <meta name="theme-color" content="#101715" />
+    <title>Movie Tracker — Discover & keep track</title>
+    <link rel="stylesheet" href="style.css" />
+    <script type="module" src="app.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="header">
+      <a class="brand" href="#discover" aria-label="Movie Tracker home"
+        ><span class="brand-mark" aria-hidden="true">◧</span
+        ><span>Movie<span class="brand-light">Tracker</span></span></a
+      >
+      <nav aria-label="Main navigation">
+        <button class="nav-btn active" data-view="discover" aria-current="page">
+          Discover
+        </button>
+        <button class="nav-btn" data-view="watchlist">
+          Watchlist <span class="badge" id="watchlist-count">0</span>
+        </button>
+        <button class="nav-btn" data-view="watched">
+          Watched <span class="badge" id="watched-count">0</span>
+        </button>
+        <button class="nav-btn" data-view="recommendations">For you</button>
+        <button class="nav-btn" data-view="stats">Insights</button>
+      </nav>
+      <div class="header-actions">
+        <button
+          class="icon-btn"
+          id="theme-toggle"
+          aria-label="Switch to light theme"
+          title="Change theme"
+        >
+          ◐</button
+        ><button class="quiet-btn" id="data-button">Your data</button>
+      </div>
+    </header>
+    <main id="main" tabindex="-1">
+      <div
+        id="storage-warning"
+        class="notice warning"
+        role="alert"
+        hidden
+      ></div>
+      <section id="discover-view" class="view">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">A LITTLE LESS SCROLLING. A GREAT NEXT WATCH.</p>
+            <h1>Find something <em>worth watching.</em></h1>
+            <p class="intro">
+              Explore the movies and shows you love. Keep a record of every good
+              find.
+            </p>
+          </div>
+          <span class="catalog-label"
+            ><span class="status-dot"></span> Powered by TMDB</span
+          >
         </div>
+        <form id="discover-form" class="discovery-panel">
+          <label for="search-input" class="search-label"
+            >Search a title, or describe what you’re looking for</label
+          >
+          <div class="search-box">
+            <span aria-hidden="true">⌕</span
+            ><input
+              id="search-input"
+              type="search"
+              maxlength="250"
+              autocomplete="off"
+              placeholder="Try “top 50 animated movies since 2000”"
+            /><button class="btn primary" type="submit" id="search-btn">
+              Find something <span aria-hidden="true">↗</span>
+            </button>
+          </div>
+          <div class="examples">
+            <span>Try a search</span
+            ><button type="button" data-preset="animation">
+              Top 50 animated since 2000</button
+            ><button type="button" data-preset="scifi">
+              Best sci-fi of the 2010s</button
+            ><button type="button" data-preset="popular">
+              Popular right now
+            </button>
+          </div>
+          <div class="filter-grid">
+            <label
+              >Type<select id="media-type-filter">
+                <option value="movie">Movies</option>
+                <option value="tv">TV shows</option>
+              </select></label
+            >
+            <label
+              >Genre<select id="genre-filter">
+                <option value="">All genres</option>
+              </select></label
+            >
+            <label
+              >From year<input
+                id="year-from"
+                type="number"
+                min="1870"
+                max="2100"
+                placeholder="Any year"
+                inputmode="numeric"
+            /></label>
+            <label
+              >To year<input
+                id="year-to"
+                type="number"
+                min="1870"
+                max="2100"
+                placeholder="Today"
+                inputmode="numeric"
+            /></label>
+            <label
+              >Sort by<select id="sort-filter">
+                <option value="popular">Most popular</option>
+                <option value="rating">Highest rated</option>
+                <option value="newest">Newest first</option>
+                <option value="trending">Trending this week</option>
+              </select></label
+            >
+            <label
+              >Minimum votes<select id="min-votes">
+                <option value="0">Any vote count</option>
+                <option value="100">100+ votes</option>
+                <option value="500" selected>500+ votes</option>
+                <option value="1000">1,000+ votes</option>
+                <option value="5000">5,000+ votes</option>
+              </select></label
+            >
+            <label
+              >Results<select id="result-limit">
+                <option value="20">20 titles</option>
+                <option value="50" selected>50 titles</option>
+                <option value="100">100 titles</option>
+              </select></label
+            >
+          </div>
+          <div class="filter-footer">
+            <p id="filter-help">
+              Ratings are TMDB community scores. Minimum votes keeps rankings
+              meaningful. Released titles only.
+            </p>
+            <button type="button" class="text-btn" id="reset-filters">
+              Reset filters
+            </button>
+          </div>
+        </form>
+        <div
+          id="query-summary"
+          class="query-summary"
+          aria-live="polite"
+          hidden
+        ></div>
+        <div class="results-heading">
+          <div>
+            <p class="eyebrow" id="results-kicker">THE NEXT WATCH</p>
+            <h2 id="results-title">Popular movies</h2>
+          </div>
+          <span id="results-count" class="muted" aria-live="polite"></span>
+        </div>
+        <div id="discover-message" aria-live="polite"></div>
+        <div
+          id="discover-grid"
+          class="movie-grid"
+          aria-label="Discovery results"
+        ></div>
+      </section>
+      <section id="library-view" class="view" hidden>
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">YOUR PERSONAL COLLECTION</p>
+            <h1 id="library-title">The watchlist.</h1>
+            <p class="intro" id="library-description">
+              Good finds, ready for the right night.
+            </p>
+          </div>
+          <button class="btn secondary" data-action="go-discover">
+            Find more titles ↗
+          </button>
+        </div>
+        <div class="library-filters">
+          <label class="library-search"
+            >Search your collection<input
+              id="library-search"
+              type="search"
+              placeholder="Title, director or notes" /></label
+          ><label
+            >Type<select id="library-type">
+              <option value="all">Movies & TV shows</option>
+              <option value="movie">Movies</option>
+              <option value="tv">TV shows</option>
+            </select></label
+          ><label
+            >Genre<select id="library-genre">
+              <option value="">All genres</option>
+            </select></label
+          ><label id="library-rating-label"
+            >Your rating<select id="library-rating">
+              <option value="">Any rating</option>
+              <option value="9">9+</option>
+              <option value="8">8+</option>
+              <option value="7">7+</option>
+              <option value="unrated">Unrated</option>
+            </select></label
+          ><label
+            >Sort by<select id="library-sort">
+              <option value="recent">Recently added / watched</option>
+              <option value="title">Title A–Z</option>
+              <option value="rating">Your rating</option>
+              <option value="year">Release year</option>
+            </select></label
+          >
+        </div>
+        <div class="results-heading compact">
+          <h2 id="library-result-title">Saved titles</h2>
+          <span class="muted" id="library-count"></span>
+        </div>
+        <div id="library-grid" class="movie-grid"></div>
+      </section>
+      <section id="recommendations-view" class="view" hidden>
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">FOLLOW YOUR TASTE</p>
+            <h1>More of <em>your kind of thing.</em></h1>
+            <p class="intro">
+              Suggestions from TMDB, based on titles you’ve watched and enjoyed.
+            </p>
+          </div>
+          <button class="btn secondary" id="refresh-recommendations">
+            Refresh suggestions ↻
+          </button>
+        </div>
+        <div id="recommendations-message" aria-live="polite"></div>
+        <div id="recommendations-grid" class="movie-grid"></div>
+      </section>
+      <section id="stats-view" class="view" hidden>
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">YOUR LIFE IN FILM</p>
+            <h1>A little <em>perspective.</em></h1>
+            <p class="intro">A snapshot of the stories you’ve collected.</p>
+          </div>
+        </div>
+        <div id="stats-content"></div>
+      </section>
+    </main>
+    <footer>
+      <span>Keep the good ones close.</span
+      ><span
+        >Data & images:
+        <a
+          href="https://www.themoviedb.org/"
+          target="_blank"
+          rel="noopener noreferrer"
+          >TMDB</a
+        >
+        · This product uses the TMDB API but is not endorsed or certified by
+        TMDB.</span
+      ><button class="text-btn" id="footer-data">
+        Saved in this browser · Back up your data ↗
+      </button>
+    </footer>
+    <dialog id="movie-dialog" aria-labelledby="detail-title">
+      <div class="dialog-bar">
+        <span class="eyebrow">A CLOSER LOOK</span
+        ><button
+          class="icon-btn"
+          data-action="close-dialog"
+          aria-label="Close details"
+        >
+          ×
+        </button>
+      </div>
+      <div id="detail-content"></div>
+    </dialog>
+    <dialog id="data-dialog" aria-labelledby="data-title">
+      <div class="dialog-bar">
+        <span class="eyebrow">YOUR COLLECTION, YOURS TO KEEP</span
+        ><button
+          class="icon-btn"
+          data-action="close-dialog"
+          aria-label="Close data settings"
+        >
+          ×
+        </button>
+      </div>
+      <h2 id="data-title">Take care of your collection.</h2>
+      <p>
+        Your watchlist, ratings and notes are saved in this browser on this
+        device. Export a backup to keep them safe or move them to another
+        browser.
+      </p>
+      <div class="data-actions">
+        <button class="btn primary" id="export-data">Export backup</button
+        ><button class="btn secondary" id="import-data">Import backup</button
+        ><input
+          id="import-file"
+          type="file"
+          accept="application/json,.json"
+          hidden
+        />
+      </div>
+      <p class="small muted">
+        Import merges with your collection. Existing ratings and notes are
+        preserved. No account or cross-device sync is enabled.
+      </p>
+      <div id="import-message" role="status"></div>
+      <hr />
+      <h3>Hidden titles</h3>
+      <p id="hidden-count"></p>
+      <button class="btn secondary" id="restore-hidden">
+        Restore hidden titles
+      </button>
+      <hr />
+      <h3>Before you leave</h3>
+      <p class="small muted">
+        Export a backup before clearing browser data. Private browsing may
+        discard saved records when you close the window.
+      </p>
+    </dialog>
+    <div id="toast" class="toast" role="status" hidden>
+      <span id="toast-text"></span
+      ><button id="undo-button" class="text-btn" hidden>Undo</button
+      ><button
+        id="dismiss-toast"
+        class="icon-btn"
+        aria-label="Dismiss notification"
+      >
+        ×
+      </button>
     </div>
-
-    <!-- Toast Notification -->
-    <div class="toast" id="toast"></div>
-
-    <script src="app.js"></script>
-</body>
+    <noscript
+      ><p class="notice warning">
+        Movie Tracker needs JavaScript enabled to search and save your
+        collection.
+      </p></noscript
+    >
+  </body>
 </html>
