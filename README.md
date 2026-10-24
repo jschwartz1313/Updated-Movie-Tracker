@@ -62,6 +62,8 @@ python3 -m http.server 4173 --bind 127.0.0.1
 
 Open `http://127.0.0.1:4173/`. The API key is configured in `lib/discovery.js`.
 
+Release assets and browser module imports carry a shared version query. Bump it together on releases so an already-open browser does not mix old scripts with a new interface.
+
 ## Verify changes
 
 Node.js 22 or later:

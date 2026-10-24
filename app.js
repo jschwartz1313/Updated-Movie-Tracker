@@ -4,15 +4,15 @@ import {
   normalizeFilters,
   describeFilters,
   createMovieClient,
-} from "./lib/discovery.js";
-import { createLibraryStore } from "./lib/storage.js";
-import { filterLibrary, libraryStats } from "./lib/library.js";
+} from "./lib/discovery.js?v=3.0.0";
+import { createLibraryStore } from "./lib/storage.js?v=3.0.0";
+import { filterLibrary, libraryStats } from "./lib/library.js?v=3.0.0";
 import {
   planSearch,
   metadataForStorage,
   recommendationSeeds,
   mergePersonalEdits,
-} from "./lib/app-model.js";
+} from "./lib/app-model.js?v=3.0.0";
 
 const $ = (id) => document.getElementById(id);
 const escapeHTML = (value) =>
